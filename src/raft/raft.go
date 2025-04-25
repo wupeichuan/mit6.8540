@@ -51,7 +51,7 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	entries map[int]interface{}
+	entry map[int]interface{}
 }
 
 // A Go object implementing a single Raft peer.
@@ -75,7 +75,7 @@ type Raft struct {
 	nextIndex []int
 	matchIndex []int
 
-	
+	has_received bool
 }
 
 // return currentTerm and whether this server
@@ -173,6 +173,7 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.has_received = true
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -186,7 +187,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if rf.votedFor == args.CandidateId {
 		if args.LastLogIndex > len(rf.log) - 1 || 
-		  (args.LastLogIndex == len(rf.log) - 1 && LastLogTerm == rf.log[len(rf.log) - 1]) {
+		  (args.LastLogIndex == len(rf.log) - 1 && LastLogTerm == rf.log[len(rf.log) - 1].entry) {
 			reply.VoteGranted = true
 			return
 		} else {
@@ -197,24 +198,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)  {
+	rf.has_received = true
 	if args.Term < rf.currentTerm {
 		reply.term = rf.currentTerm
 		reply.Success = false
 		return
 	}
-	if args.PrevLogIndex > len(rf.log) - 1 || args.PrevLogTerm != rf.log[args.PrevLogIndex] {
+	if args.PrevLogIndex > len(rf.log) - 1 || args.PrevLogTerm != rf.log[args.PrevLogIndex].entry {
 		reply.Success = false
 		return
 	}
 	index := args.PrevLogIndex + 1
 	for entry := range args.Entries {
-		if index <= len(rf.log) - 1 && entry != rf.log[index] {
-			rf.log[index] = entry
+		if index <= len(rf.log) - 1 && entry != rf.log[index].entry {
+			rf.log[index] = Log{entry}
 		} else if index > len(rf.log) - 1 {
 			if index != len(rf.log) {
 				panic("AppendEntries")
 			}
-			rf.log = append(rf.log, entry)
+			rf.log = append(rf.log, Log{entry})
 		} else {}
 		index++
 	}
@@ -300,18 +302,25 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here (2A)
 		// Check if a leader election should be started.
 
-
+		rf.has_received = false
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+
+		if !rf.has_received {
+			rf.candidate()
+		}
 	}
 }
 
+func (rf *Raft) candidate() {
+	rf.currentTerm++
+	
+}
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
