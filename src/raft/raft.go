@@ -50,6 +50,10 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type Log struct {
+	entries map[int]interface{}
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -61,7 +65,17 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	votedFor int
+	log []Log
 
+	commitIndex int
+	lastApplied int
+
+	nextIndex []int
+	matchIndex []int
+
+	
 }
 
 // return currentTerm and whether this server
@@ -128,17 +142,85 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term int
+	CandidateId int 
+	LastLogIndex int
+	LastLogTerm Log
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term int
+	VoteGranted bool
+}
+
+type AppendEntriesArgs struct {
+	Term int
+	LeaderId int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []map[int]interface{}
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+
+	if rf.votedFor == nil {
+		reply.VoteGranted = true
+		return
+	}
+
+	if rf.votedFor == args.CandidateId {
+		if args.LastLogIndex > len(rf.log) - 1 || 
+		  (args.LastLogIndex == len(rf.log) - 1 && LastLogTerm == rf.log[len(rf.log) - 1]) {
+			reply.VoteGranted = true
+			return
+		} else {
+			reply.VoteGranted = false
+			return
+		}
+	}
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)  {
+	if args.Term < rf.currentTerm {
+		reply.term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	if args.PrevLogIndex > len(rf.log) - 1 || args.PrevLogTerm != rf.log[args.PrevLogIndex] {
+		reply.Success = false
+		return
+	}
+	index := args.PrevLogIndex + 1
+	for entry := range args.Entries {
+		if index <= len(rf.log) - 1 && entry != rf.log[index] {
+			rf.log[index] = entry
+		} else if index > len(rf.log) - 1 {
+			if index != len(rf.log) {
+				panic("AppendEntries")
+			}
+			rf.log = append(rf.log, entry)
+		} else {}
+		index++
+	}
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, index - 1)
+	}
 }
 
 // example code to send a RequestVote RPC to a server.

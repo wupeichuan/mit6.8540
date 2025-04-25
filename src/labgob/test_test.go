@@ -58,7 +58,7 @@ func TestGOB(t *testing.T) {
 		r := bytes.NewBuffer(data)
 		d := NewDecoder(r)
 		if d.Decode(&x0) != nil ||
-			d.Decode(&x1) != nil ||
+			d.Decode(&x1) != nil 
 			d.Decode(&t1) != nil ||
 			d.Decode(&t2) != nil {
 			t.Fatalf("Decode failed")
