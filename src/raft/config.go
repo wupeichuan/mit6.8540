@@ -92,6 +92,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 		applier = cfg.applierSnap
 	}
 	// create a full set of Rafts.
+	InitDebug()
 	for i := 0; i < cfg.n; i++ {
 		cfg.logs[i] = map[int]interface{}{}
 		cfg.start1(i, applier)
