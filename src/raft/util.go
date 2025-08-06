@@ -3,6 +3,8 @@ package raft
 import "log"
 import "time"
 import "fmt"
+import "os"
+import "strconv"
 
 func getVerbosity() int {
 	v := os.Getenv("VERBOSE")
@@ -47,8 +49,7 @@ func InitDebug() {
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	time := time.Since(debugStart).Microseconds()
-	time /= 100
+	time := time.Since(debugStart).Milliseconds()
 	prefix := fmt.Sprintf("%06d %v ", time, string(topic))
 	format = prefix + format
 	log.Printf(format, a...)
