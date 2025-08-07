@@ -519,15 +519,15 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-	Debug(dLog, "[FLAG1]")
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-	Debug(dLog, "[FLAG2]")
+
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
-	Debug(dLog, "[FLAG2] leader1=%d, leader2=%d", leader1, leader2)
+
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
@@ -553,13 +553,13 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
-	Debug(dLog, "[FLAG3]")
+
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
 	cfg.one(rand.Int(), servers, true)
-	Debug(dLog, "[FLAG4]")
+
 
 	cfg.end()
 }

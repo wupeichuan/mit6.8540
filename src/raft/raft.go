@@ -186,6 +186,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	ConflictIndex int
+	ConflictTerm int
 }
 
 // example RequestVote RPC handler.
@@ -252,6 +254,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.log) - 1 || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		if args.PrevLogIndex > len(rf.log) - 1 {
+			reply.ConflictIndex = len(rf.log)
+			reply.ConflictTerm = -1
+		} else {
+			reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+			low := 1
+			high := args.PrevLogIndex
+			middle := (low + high) / 2
+			answer := -1
+			for {
+				if high - low > 1 {
+					if rf.log[middle].Term < reply.ConflictTerm {
+						low = middle
+					} else if rf.log[middle].Term == reply.ConflictTerm {
+						high = middle
+					} else {
+						high = middle - 1
+					}
+					middle = (low + high) / 2
+				} else {
+					if rf.log[high].Term >= reply.ConflictTerm {
+						answer = low
+						break
+					} else {
+						answer = high
+						break
+					}
+				}
+			}
+			answer = answer + 1
+			reply.ConflictIndex = answer
+		}
 		return
 	}
 
@@ -390,25 +424,9 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 	if reply.Success {
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-		if rf.matchIndex[server] > rf.commitIndex {
-			majority := 1
-			for i := 0; i < len(rf.peers); i++ {
-				if i != rf.me {
-					if rf.matchIndex[i] >= rf.matchIndex[server] {
-						majority++
-					}
-				}
-			}
-			if majority >= len(rf.peers) / 2 + 1 {
-				if rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
-					rf.commitIndex = rf.matchIndex[server]
-					rf.cond.Signal()
-					Debug(dCommit, "S%d commitIndex %d %v", rf.me, rf.commitIndex, rf.log[rf.commitIndex].Entry)
-				}
-			}
-		}
+		rf.commitHandle(rf.matchIndex[server])
 	} else {
-		rf.nextIndex[server] = args.PrevLogIndex
+		rf.nextIndex[server] = rf.conflictHandle(reply.ConflictIndex, reply.ConflictTerm)
 	}
 }
 
@@ -441,28 +459,67 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 	if reply.Success {
 		rf.matchIndex[server] = args.PrevLogIndex
 		rf.nextIndex[server] = args.PrevLogIndex + 1
-		if rf.matchIndex[server] > rf.commitIndex {
-			majority := 1
-			for i := 0; i < len(rf.peers); i++ {
-				if i != rf.me {
-					if rf.matchIndex[i] >= rf.matchIndex[server] {
-						majority++
-					}
-				}
-			}
-			if majority >= len(rf.peers) / 2 + 1 {
-				if rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
-					rf.commitIndex = rf.matchIndex[server]
-					rf.cond.Signal()
-					Debug(dCommit, "S%d commitIndex %d %v", rf.me, rf.commitIndex, rf.log[rf.commitIndex].Entry)
-				}
-			}
-		}
+		rf.commitHandle(rf.matchIndex[server])
 	} else {
-		rf.nextIndex[server] = args.PrevLogIndex
+		rf.nextIndex[server] = rf.conflictHandle(reply.ConflictIndex, reply.ConflictTerm)
 	}
 }
 
+func (rf *Raft) commitHandle(matchIndex int) {
+	for index := matchIndex; index > rf.commitIndex; index-- {
+		majority := 1
+		for i := 0; i < len(rf.peers); i++ {
+			if i != rf.me {
+				if rf.matchIndex[i] >= index {
+					majority++
+				}
+			}
+		}
+		if majority >= len(rf.peers) / 2 + 1 {
+			if rf.log[index].Term == rf.currentTerm {
+				rf.commitIndex = index
+				rf.cond.Signal()
+				Debug(dCommit, "S%d commitIndex %d %v", rf.me, rf.commitIndex, rf.log[rf.commitIndex].Entry)
+			}
+		}
+	}
+}
+
+func (rf *Raft) conflictHandle(conflictIndex int, conflictTerm int) int {
+	if conflictTerm == -1 {
+		return conflictIndex
+	}
+	low := 1
+	high := len(rf.log)
+	middle := high / 2
+	answer := -1
+	for {
+		if high - low > 1 {
+			if rf.log[middle].Term < conflictTerm {
+				low = middle + 1
+			} else if rf.log[middle].Term == conflictTerm {
+				low = middle
+			} else {
+				high = middle
+			}
+			middle = (low + high) / 2
+		} else {
+			if rf.log[low].Term <= conflictTerm {
+				answer = high
+				break
+			} else {
+				answer = low
+				break
+			}
+		}
+	}
+
+	if rf.log[answer - 1].Term == conflictTerm {
+		return answer
+	} else {
+		return conflictIndex
+	}
+}
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -578,12 +635,14 @@ func (rf *Raft) ticker() {
 				for server := 0; server < len(rf.peers); server++ {
 					if server != rf.me {
 						if len(rf.log) - 1 >= rf.nextIndex[server] {
+							Entries := make([]Log, len(rf.log) - rf.nextIndex[server])
+							copy(Entries, rf.log[rf.nextIndex[server]:])
 							go rf.sendAppendEntries(server, AppendEntriesArgs{
 								Term:         rf.currentTerm,
 								LeaderId:     rf.me,
 								PrevLogIndex: rf.nextIndex[server] - 1,
 								PrevLogTerm:  rf.log[rf.nextIndex[server] - 1].Term,
-								Entries:      []Log{rf.log[rf.nextIndex[server]]},
+								Entries:      Entries,
 								LeaderCommit: rf.commitIndex,
 							})
 						} else {
