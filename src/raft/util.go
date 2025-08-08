@@ -33,6 +33,7 @@ func InitDebug() {
 	debugStart = time.Now()
 	mu.Unlock()
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+	fmt.Sprintf("InitDebug")
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
