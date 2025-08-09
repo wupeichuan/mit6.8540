@@ -282,6 +282,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	Debug(dLog2, "S%d Got AppendEntries From S%d len(rf.log)-1=%d", rf.me, args.LeaderId, len(rf.log)-1)
 	i := 0
 	for ; i < len(args.Entries); i++ {
 		if args.PrevLogIndex+1+i > len(rf.log)-1 {
@@ -415,7 +416,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 					rf.matchIndex[server] = 0
 				}
 			}
-			rf.timeout = time.Duration(150) * time.Millisecond
+			rf.timeout = time.Duration(0) * time.Millisecond
 			rf.lastReceiveTime = time.Now()
 		}
 		return
@@ -456,8 +457,8 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 	}
 
 	if reply.Success {
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+		rf.matchIndex[server] = Max(args.PrevLogIndex+len(args.Entries), rf.matchIndex[server])
+		rf.nextIndex[server] = Max(args.PrevLogIndex+len(args.Entries)+1, rf.nextIndex[server])
 		rf.commitHandle(rf.matchIndex[server])
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
@@ -496,8 +497,8 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 	}
 
 	if reply.Success {
-		rf.matchIndex[server] = args.PrevLogIndex
-		rf.nextIndex[server] = args.PrevLogIndex + 1
+		rf.matchIndex[server] = Max(args.PrevLogIndex, rf.matchIndex[server])
+		rf.nextIndex[server] = Max(args.PrevLogIndex + 1, rf.nextIndex[server])
 		rf.commitHandle(rf.matchIndex[server])
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
@@ -600,6 +601,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:  rf.currentTerm,
 	})
 	haschange = true
+	rf.timeout = time.Duration(0) * time.Millisecond
 	return len(rf.log) - 1, rf.currentTerm, true
 }
 
@@ -654,7 +656,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		time.Sleep(time.Duration(5) * time.Millisecond)
+		time.Sleep(time.Duration(1) * time.Millisecond)
 		rf.mu.Lock()
 		if time.Since(rf.lastReceiveTime).Milliseconds() > rf.timeout.Milliseconds() {
 			if rf.serverstate == serverstate.follower {
@@ -668,13 +670,18 @@ func (rf *Raft) ticker() {
 				rf.ballot++
 				haschange := true
 				rf.persistHandle(&haschange)
+
+				Term := rf.currentTerm
+				LastLogIndex := len(rf.log) - 1
+				LastLogTerm := rf.log[len(rf.log)-1].Term
+				rf.mu.Unlock()
 				for server := 0; server < len(rf.peers); server++ {
 					if server != rf.me {
 						go rf.sendRequestVote(server, RequestVoteArgs{
-							Term:         rf.currentTerm,
+							Term:         Term,
 							CandidateId:  rf.me,
-							LastLogIndex: len(rf.log) - 1,
-							LastLogTerm:  rf.log[len(rf.log)-1].Term,
+							LastLogIndex: LastLogIndex,
+							LastLogTerm:  LastLogTerm,
 						})
 					}
 				}
@@ -687,13 +694,18 @@ func (rf *Raft) ticker() {
 				rf.ballot++
 				haschange := true
 				rf.persistHandle(&haschange)
+
+				Term := rf.currentTerm
+				LastLogIndex := len(rf.log) - 1
+				LastLogTerm := rf.log[len(rf.log)-1].Term
+				rf.mu.Unlock()
 				for server := 0; server < len(rf.peers); server++ {
 					if server != rf.me {
 						go rf.sendRequestVote(server, RequestVoteArgs{
-							Term:         rf.currentTerm,
+							Term:         Term,
 							CandidateId:  rf.me,
-							LastLogIndex: len(rf.log) - 1,
-							LastLogTerm:  rf.log[len(rf.log)-1].Term,
+							LastLogIndex: LastLogIndex,
+							LastLogTerm:  LastLogTerm,
 						})
 					}
 				}
@@ -701,33 +713,48 @@ func (rf *Raft) ticker() {
 				Debug(dLeader, "S%d Leader, sendAppendEntries in T%d", rf.me, rf.currentTerm)
 				rf.timeout = time.Duration(150) * time.Millisecond
 				rf.lastReceiveTime = time.Now()
+
+				length := len(rf.log) - 1
+				Entries := make([]Log, len(rf.log))
+				copy(Entries, rf.log)
+				Term := rf.currentTerm
+				PrevLogIndex := make([]int, len(rf.peers))
+				PrevLogTerm := make([]int, len(rf.peers))
 				for server := 0; server < len(rf.peers); server++ {
 					if server != rf.me {
-						if len(rf.log)-1 >= rf.nextIndex[server] {
-							Entries := make([]Log, len(rf.log)-rf.nextIndex[server])
-							copy(Entries, rf.log[rf.nextIndex[server]:])
+						PrevLogIndex[server] = rf.nextIndex[server] - 1
+						PrevLogTerm[server] = rf.log[rf.nextIndex[server]-1].Term
+					}
+				}
+				LeaderCommit := rf.commitIndex
+				rf.mu.Unlock()
+				for server := 0; server < len(rf.peers); server++ {
+					if server != rf.me {
+						if length >= PrevLogIndex[server] {
+							Debug(dLeader, "S%d Leader, sendAppendEntries in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, server, PrevLogIndex[server])
 							go rf.sendAppendEntries(server, AppendEntriesArgs{
-								Term:         rf.currentTerm,
+								Term:         Term,
 								LeaderId:     rf.me,
-								PrevLogIndex: rf.nextIndex[server] - 1,
-								PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-								Entries:      Entries,
-								LeaderCommit: rf.commitIndex,
+								PrevLogIndex: PrevLogIndex[server],
+								PrevLogTerm:  PrevLogTerm[server],
+								Entries:      Entries[PrevLogIndex[server]+1:],
+								LeaderCommit: LeaderCommit,
 							})
 						} else {
 							go rf.sendHeartBeat(server, AppendEntriesArgs{
-								Term:         rf.currentTerm,
+								Term:         Term,
 								LeaderId:     rf.me,
-								PrevLogIndex: rf.nextIndex[server] - 1,
-								PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-								LeaderCommit: rf.commitIndex,
+								PrevLogIndex: PrevLogIndex[server],
+								PrevLogTerm:  PrevLogTerm[server],
+								LeaderCommit: LeaderCommit,
 							})
 						}
 					}
 				}
 			}
+		} else {
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 	}
 }
 
