@@ -20,6 +20,7 @@ import "sync"
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
+	InitDebug()
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -124,6 +125,7 @@ func TestManyElections2A(t *testing.T) {
 }
 
 func TestBasicAgree2B(t *testing.T) {
+	InitDebug()
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -675,6 +677,7 @@ loop:
 }
 
 func TestPersist12C(t *testing.T) {
+	InitDebug()
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -1164,6 +1167,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 }
 
 func TestSnapshotBasic2D(t *testing.T) {
+	InitDebug()
 	snapcommon(t, "Test (2D): snapshots basic", false, true, false)
 }
 

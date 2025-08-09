@@ -3,7 +3,6 @@ package raft
 import "log"
 import "time"
 import "fmt"
-import "sync"
 
 // Debugging
 type logTopic string
@@ -27,19 +26,14 @@ const (
 )
 
 var debugStart time.Time
-var mu sync.Mutex
 func InitDebug() {
-	mu.Lock()
 	debugStart = time.Now()
-	mu.Unlock()
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 	fmt.Sprintf("InitDebug")
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	mu.Lock()
 	time := time.Since(debugStart).Milliseconds()
-	mu.Unlock()
 	prefix := fmt.Sprintf("%06d %v ", time, string(topic))
 	format = prefix + format
 	log.Printf(format, a...)
