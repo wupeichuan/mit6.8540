@@ -604,10 +604,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) apply() {
-	for {
+	for rf.killed() == false {
 		rf.mu.Lock()
 		for rf.lastApplied == rf.commitIndex {
 			rf.cond.Wait()
+			if rf.killed() {
+				return
+			}
 		}
 		m := make([]ApplyMsg, rf.commitIndex-rf.lastApplied)
 		for i := 0; rf.lastApplied < rf.commitIndex; i++ {
@@ -639,6 +642,7 @@ func (rf *Raft) apply() {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.cond.Signal()
 }
 
 func (rf *Raft) killed() bool {
