@@ -54,3 +54,15 @@ func Max(a int, b int) int {
 		return b
 	}
 }
+
+func RemoveRep(slc []int) []int {
+	result := []int{}
+	tempMap := map[int]byte{}
+	for _, e := range slc {
+		if _, ok := tempMap[e]; !ok {
+			tempMap[e] = 0
+			result = append(result, e)
+		}
+	}
+	return result
+}

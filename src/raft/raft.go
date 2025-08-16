@@ -93,6 +93,8 @@ type Raft struct {
 	timeout         time.Duration
 	serverstate     stateType
 	ballot          int
+	timeCh          chan int
+	quickreCh       chan []int
 }
 
 // return currentTerm and whether this server
@@ -374,16 +376,17 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 	}
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	haschange := false
-	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.candidate {
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term != rf.currentTerm {
 		Debug(dVote, "S%d <- S%d, Not Got Vote (args.Term != rf.currentTerm)", rf.me, server)
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -395,6 +398,8 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 		haschange = true
 		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
 		rf.lastReceiveTime = time.Now()
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -416,13 +421,26 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 					rf.matchIndex[server] = 0
 				}
 			}
-			rf.timeout = time.Duration(0) * time.Millisecond
+			rf.timeout = time.Duration(150) * time.Millisecond
 			rf.lastReceiveTime = time.Now()
+			rf.persistHandle(&haschange)
+			rf.mu.Unlock()
+			servers := []int{}
+			for server := 0; server < len(rf.peers); server++ {
+				if server != rf.me {
+					servers = append(servers, server)
+				}
+			}
+			rf.quickreCh <- servers
+		} else {
+			rf.persistHandle(&haschange)
+			rf.mu.Unlock()
 		}
-		return
+	} else {
+		Debug(dVote, "S%d <- S%d, Not Got Vote", rf.me, server)
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 	}
-
-	Debug(dVote, "S%d <- S%d, Not Got Vote", rf.me, server)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
@@ -432,16 +450,17 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 	}
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	haschange := false
-	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.leader {
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term != rf.currentTerm {
 		Debug(dLog2, "S%d <- S%d (args.Term != rf.currentTerm)", rf.me, server)
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -453,6 +472,8 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 		haschange = true
 		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
 		rf.lastReceiveTime = time.Now()
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -460,8 +481,14 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 		rf.matchIndex[server] = Max(args.PrevLogIndex+len(args.Entries), rf.matchIndex[server])
 		rf.nextIndex[server] = Max(args.PrevLogIndex+len(args.Entries)+1, rf.nextIndex[server])
 		rf.commitHandle(rf.matchIndex[server])
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
+		servers := []int{server}
+		rf.quickreCh <- servers
 	}
 }
 
@@ -472,16 +499,17 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 	}
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	haschange := false
-	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.leader {
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term != rf.currentTerm {
 		Debug(dLeader, "S%d <- S%d (args.Term != rf.currentTerm)", rf.me, server)
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -493,6 +521,8 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 		haschange = true
 		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
 		rf.lastReceiveTime = time.Now()
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -500,8 +530,14 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 		rf.matchIndex[server] = Max(args.PrevLogIndex, rf.matchIndex[server])
 		rf.nextIndex[server] = Max(args.PrevLogIndex + 1, rf.nextIndex[server])
 		rf.commitHandle(rf.matchIndex[server])
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
+		servers := []int{server}
+		rf.quickreCh <- servers
 	}
 }
 
@@ -588,11 +624,10 @@ func (rf *Raft) persistHandle(haschange *bool) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	haschange := false
-	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.leader {
+		rf.persistHandle(&haschange)
+		rf.mu.Unlock()
 		return -1, -1, false
 	}
 
@@ -600,9 +635,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Entry: command,
 		Term:  rf.currentTerm,
 	})
+
+	length := len(rf.log) - 1
+	currentTerm := rf.currentTerm
 	haschange = true
-	rf.timeout = time.Duration(0) * time.Millisecond
-	return len(rf.log) - 1, rf.currentTerm, true
+	rf.persistHandle(&haschange)
+	rf.mu.Unlock()
+	servers := []int{}
+	for server := 0; server < len(rf.peers); server++ {
+		if server != rf.me {
+			servers = append(servers, server)
+		}
+	}
+	rf.quickreCh <- servers
+	return length, currentTerm, true
 }
 
 func (rf *Raft) apply() {
@@ -641,6 +687,156 @@ func (rf *Raft) apply() {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
+func (rf *Raft) timeHandle() {
+	for rf.killed() == false {
+		time.Sleep(time.Duration(2) * time.Millisecond)
+		rf.mu.Lock()
+		if time.Since(rf.lastReceiveTime).Milliseconds() > rf.timeout.Milliseconds() {
+			rf.mu.Unlock()
+			rf.timeCh <- -1
+		} else {
+			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) timeoutHandle() {
+	rf.mu.Lock()
+	if rf.serverstate == serverstate.follower {
+		Debug(dVote, "S%d Follower, Starting Election", rf.me)
+		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+		rf.lastReceiveTime = time.Now()
+		rf.serverstate = serverstate.candidate
+		rf.votedFor = rf.me
+		rf.currentTerm++
+		rf.ballot = 0
+		rf.ballot++
+		haschange := true
+		rf.persistHandle(&haschange)
+
+		Term := rf.currentTerm
+		LastLogIndex := len(rf.log) - 1
+		LastLogTerm := rf.log[len(rf.log)-1].Term
+		rf.mu.Unlock()
+		for server := 0; server < len(rf.peers); server++ {
+			if server != rf.me {
+				go rf.sendRequestVote(server, RequestVoteArgs{
+					Term:         Term,
+					CandidateId:  rf.me,
+					LastLogIndex: LastLogIndex,
+					LastLogTerm:  LastLogTerm,
+				})
+			}
+		}
+	} else if rf.serverstate == serverstate.candidate {
+		Debug(dVote, "S%d Candidate, Not Achieved Majority for T%d (%d) continuing to elect", rf.me, rf.currentTerm, rf.ballot)
+		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+		rf.lastReceiveTime = time.Now()
+		rf.currentTerm++
+		rf.ballot = 0
+		rf.ballot++
+		haschange := true
+		rf.persistHandle(&haschange)
+
+		Term := rf.currentTerm
+		LastLogIndex := len(rf.log) - 1
+		LastLogTerm := rf.log[len(rf.log)-1].Term
+		rf.mu.Unlock()
+		for server := 0; server < len(rf.peers); server++ {
+			if server != rf.me {
+				go rf.sendRequestVote(server, RequestVoteArgs{
+					Term:         Term,
+					CandidateId:  rf.me,
+					LastLogIndex: LastLogIndex,
+					LastLogTerm:  LastLogTerm,
+				})
+			}
+		}
+	} else {
+		Debug(dLeader, "S%d Leader, sendAppendEntries in T%d", rf.me, rf.currentTerm)
+		rf.timeout = time.Duration(150) * time.Millisecond
+		rf.lastReceiveTime = time.Now()
+
+		length := len(rf.log) - 1
+		Entries := make([]Log, len(rf.log))
+		copy(Entries, rf.log)
+		Term := rf.currentTerm
+		PrevLogIndex := make([]int, len(rf.peers))
+		PrevLogTerm := make([]int, len(rf.peers))
+		for server := 0; server < len(rf.peers); server++ {
+			if server != rf.me {
+				PrevLogIndex[server] = rf.nextIndex[server] - 1
+				PrevLogTerm[server] = rf.log[rf.nextIndex[server]-1].Term
+			}
+		}
+		LeaderCommit := rf.commitIndex
+		rf.mu.Unlock()
+		for server := 0; server < len(rf.peers); server++ {
+			if server != rf.me {
+				if length >= PrevLogIndex[server] {
+					Debug(dLeader, "S%d Leader, sendAppendEntries in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, server, PrevLogIndex[server])
+					go rf.sendAppendEntries(server, AppendEntriesArgs{
+						Term:         Term,
+						LeaderId:     rf.me,
+						PrevLogIndex: PrevLogIndex[server],
+						PrevLogTerm:  PrevLogTerm[server],
+						Entries:      Entries[PrevLogIndex[server]+1:],
+						LeaderCommit: LeaderCommit,
+					})
+				} else {
+					go rf.sendHeartBeat(server, AppendEntriesArgs{
+						Term:         Term,
+						LeaderId:     rf.me,
+						PrevLogIndex: PrevLogIndex[server],
+						PrevLogTerm:  PrevLogTerm[server],
+						LeaderCommit: LeaderCommit,
+					})
+				}
+			}
+		}
+	}
+}
+
+func (rf *Raft) quickreHandle(servers []int) {
+	rf.mu.Lock()
+	Debug(dLeader, "S%d Leader, sendAppendEntries(quickreHandle) in T%d", rf.me, rf.currentTerm)
+	length := len(rf.log) - 1
+	Entries := make([]Log, len(rf.log))
+	copy(Entries, rf.log)
+	Term := rf.currentTerm
+	PrevLogIndex := make([]int, len(servers))
+	PrevLogTerm := make([]int, len(servers))
+	for server := 0; server < len(servers); server++ {
+		PrevLogIndex[server] = rf.nextIndex[servers[server]] - 1
+		PrevLogTerm[server] = rf.log[rf.nextIndex[servers[server]]-1].Term
+	}
+	LeaderCommit := rf.commitIndex
+	rf.mu.Unlock()
+	for server := 0; server < len(servers); server++ {
+		if servers[server] != rf.me {
+			if length >= PrevLogIndex[server] {
+				Debug(dLeader, "S%d Leader, sendAppendEntries(quickreHandle) in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, servers[server], PrevLogIndex[server])
+				go rf.sendAppendEntries(servers[server], AppendEntriesArgs{
+					Term:         Term,
+					LeaderId:     rf.me,
+					PrevLogIndex: PrevLogIndex[server],
+					PrevLogTerm:  PrevLogTerm[server],
+					Entries:      Entries[PrevLogIndex[server]+1:],
+					LeaderCommit: LeaderCommit,
+				})
+			} else {
+				go rf.sendHeartBeat(servers[server], AppendEntriesArgs{
+					Term:         Term,
+					LeaderId:     rf.me,
+					PrevLogIndex: PrevLogIndex[server],
+					PrevLogTerm:  PrevLogTerm[server],
+					LeaderCommit: LeaderCommit,
+				})
+			}
+		}
+	}
+}
+
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -653,108 +849,22 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
+	// Your code here (2A)
+	// Check if a leader election should be started.
 	for rf.killed() == false {
-		// Your code here (2A)
-		// Check if a leader election should be started.
-		time.Sleep(time.Duration(1) * time.Millisecond)
-		rf.mu.Lock()
-		if time.Since(rf.lastReceiveTime).Milliseconds() > rf.timeout.Milliseconds() {
-			if rf.serverstate == serverstate.follower {
-				Debug(dVote, "S%d Follower, Starting Election", rf.me)
-				rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
-				rf.lastReceiveTime = time.Now()
-				rf.serverstate = serverstate.candidate
-				rf.votedFor = rf.me
-				rf.currentTerm++
-				rf.ballot = 0
-				rf.ballot++
-				haschange := true
-				rf.persistHandle(&haschange)
-
-				Term := rf.currentTerm
-				LastLogIndex := len(rf.log) - 1
-				LastLogTerm := rf.log[len(rf.log)-1].Term
-				rf.mu.Unlock()
-				for server := 0; server < len(rf.peers); server++ {
-					if server != rf.me {
-						go rf.sendRequestVote(server, RequestVoteArgs{
-							Term:         Term,
-							CandidateId:  rf.me,
-							LastLogIndex: LastLogIndex,
-							LastLogTerm:  LastLogTerm,
-						})
-					}
-				}
-			} else if rf.serverstate == serverstate.candidate {
-				Debug(dVote, "S%d Candidate, Not Achieved Majority for T%d (%d) continuing to elect", rf.me, rf.currentTerm, rf.ballot)
-				rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
-				rf.lastReceiveTime = time.Now()
-				rf.currentTerm++
-				rf.ballot = 0
-				rf.ballot++
-				haschange := true
-				rf.persistHandle(&haschange)
-
-				Term := rf.currentTerm
-				LastLogIndex := len(rf.log) - 1
-				LastLogTerm := rf.log[len(rf.log)-1].Term
-				rf.mu.Unlock()
-				for server := 0; server < len(rf.peers); server++ {
-					if server != rf.me {
-						go rf.sendRequestVote(server, RequestVoteArgs{
-							Term:         Term,
-							CandidateId:  rf.me,
-							LastLogIndex: LastLogIndex,
-							LastLogTerm:  LastLogTerm,
-						})
-					}
-				}
-			} else {
-				Debug(dLeader, "S%d Leader, sendAppendEntries in T%d", rf.me, rf.currentTerm)
-				rf.timeout = time.Duration(150) * time.Millisecond
-				rf.lastReceiveTime = time.Now()
-
-				length := len(rf.log) - 1
-				Entries := make([]Log, len(rf.log))
-				copy(Entries, rf.log)
-				Term := rf.currentTerm
-				PrevLogIndex := make([]int, len(rf.peers))
-				PrevLogTerm := make([]int, len(rf.peers))
-				for server := 0; server < len(rf.peers); server++ {
-					if server != rf.me {
-						PrevLogIndex[server] = rf.nextIndex[server] - 1
-						PrevLogTerm[server] = rf.log[rf.nextIndex[server]-1].Term
-					}
-				}
-				LeaderCommit := rf.commitIndex
-				rf.mu.Unlock()
-				for server := 0; server < len(rf.peers); server++ {
-					if server != rf.me {
-						if length >= PrevLogIndex[server] {
-							Debug(dLeader, "S%d Leader, sendAppendEntries in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, server, PrevLogIndex[server])
-							go rf.sendAppendEntries(server, AppendEntriesArgs{
-								Term:         Term,
-								LeaderId:     rf.me,
-								PrevLogIndex: PrevLogIndex[server],
-								PrevLogTerm:  PrevLogTerm[server],
-								Entries:      Entries[PrevLogIndex[server]+1:],
-								LeaderCommit: LeaderCommit,
-							})
-						} else {
-							go rf.sendHeartBeat(server, AppendEntriesArgs{
-								Term:         Term,
-								LeaderId:     rf.me,
-								PrevLogIndex: PrevLogIndex[server],
-								PrevLogTerm:  PrevLogTerm[server],
-								LeaderCommit: LeaderCommit,
-							})
-						}
-					}
-				}
-			}
-		} else {
-			rf.mu.Unlock()
+		select {
+		case <-rf.timeCh : 
+			go rf.timeoutHandle()
+		case servers := <-rf.quickreCh :
+			go rf.quickreHandle(servers)
+		case <-time.After(time.Duration(10) * time.Millisecond) :
 		}
+	}
+	if len(rf.timeCh) > 0 {
+		<-rf.timeCh
+	}
+	for len(rf.quickreCh) > 0 {
+		<-rf.quickreCh
 	}
 }
 
@@ -790,8 +900,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastReceiveTime = debugStart
 	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
 	rf.ballot = 0
+	rf.timeCh = make(chan int)
+	rf.quickreCh = make(chan []int, len(rf.peers))
 
 	// start ticker goroutine to start elections
+	go rf.timeHandle()
 	go rf.ticker()
 	go rf.apply()
 
