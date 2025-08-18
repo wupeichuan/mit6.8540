@@ -3,7 +3,7 @@ echo "===== the test start ====="
 
 start_time=$(date +%s.%N)
 tmpdir=$(mktemp -d)
-for i in {0..5}; do
+for i in {0..29}; do
     (
         time go test -run 2C
         if [ $? -eq 0 ]; then
@@ -17,7 +17,7 @@ done
 wait
 end_time=$(date +%s.%N)
 result=()
-for i in {0..5}; do
+for i in {0..29}; do
     if [ -f "$tmpdir/$i" ]; then
         result[$i]=$(<"$tmpdir/$i")
     else

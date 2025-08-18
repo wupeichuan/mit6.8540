@@ -94,7 +94,7 @@ type Raft struct {
 	serverstate     stateType
 	ballot          int
 	timeCh          chan int
-	quickreCh       chan []int
+	quickreCh       chan int
 }
 
 // return currentTerm and whether this server
@@ -284,7 +284,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	Debug(dLog2, "S%d Got AppendEntries From S%d len(rf.log)-1=%d", rf.me, args.LeaderId, len(rf.log)-1)
+	Debug(dLog2, "S%d Got AppendEntries From S%d len(rf.log)-1=%d len(args.Entries)-1=%d", rf.me, args.LeaderId, len(rf.log)-1, len(args.Entries)-1)
 	i := 0
 	for ; i < len(args.Entries); i++ {
 		if args.PrevLogIndex+1+i > len(rf.log)-1 {
@@ -425,13 +425,11 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 			rf.lastReceiveTime = time.Now()
 			rf.persistHandle(&haschange)
 			rf.mu.Unlock()
-			servers := []int{}
 			for server := 0; server < len(rf.peers); server++ {
 				if server != rf.me {
-					servers = append(servers, server)
+					rf.quickreCh <- server
 				}
 			}
-			rf.quickreCh <- servers
 		} else {
 			rf.persistHandle(&haschange)
 			rf.mu.Unlock()
@@ -487,8 +485,7 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
 		rf.persistHandle(&haschange)
 		rf.mu.Unlock()
-		servers := []int{server}
-		rf.quickreCh <- servers
+		rf.quickreCh <- server
 	}
 }
 
@@ -528,7 +525,7 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 
 	if reply.Success {
 		rf.matchIndex[server] = Max(args.PrevLogIndex, rf.matchIndex[server])
-		rf.nextIndex[server] = Max(args.PrevLogIndex + 1, rf.nextIndex[server])
+		rf.nextIndex[server] = Max(args.PrevLogIndex+1, rf.nextIndex[server])
 		rf.commitHandle(rf.matchIndex[server])
 		rf.persistHandle(&haschange)
 		rf.mu.Unlock()
@@ -536,8 +533,7 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
 		rf.persistHandle(&haschange)
 		rf.mu.Unlock()
-		servers := []int{server}
-		rf.quickreCh <- servers
+		rf.quickreCh <- server
 	}
 }
 
@@ -573,7 +569,7 @@ func (rf *Raft) conflictHandle1(conflictIndex int, conflictTerm int) int {
 
 	low := 1
 	high := len(rf.log)
-	middle := high / 2
+	middle := (low + high) / 2
 	answer := -1
 	for {
 		if high-low > 1 {
@@ -586,7 +582,7 @@ func (rf *Raft) conflictHandle1(conflictIndex int, conflictTerm int) int {
 			}
 			middle = (low + high) / 2
 		} else {
-			if rf.log[low].Term <= conflictTerm {
+			if low > len(rf.log) - 1 || rf.log[low].Term <= conflictTerm {
 				answer = high
 				break
 			} else {
@@ -641,13 +637,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	haschange = true
 	rf.persistHandle(&haschange)
 	rf.mu.Unlock()
-	servers := []int{}
 	for server := 0; server < len(rf.peers); server++ {
 		if server != rf.me {
-			servers = append(servers, server)
+			rf.quickreCh <- server
 		}
 	}
-	rf.quickreCh <- servers
 	return length, currentTerm, true
 }
 
@@ -656,9 +650,6 @@ func (rf *Raft) apply() {
 		rf.mu.Lock()
 		for rf.lastApplied == rf.commitIndex {
 			rf.cond.Wait()
-			if rf.killed() {
-				return
-			}
 		}
 		m := make([]ApplyMsg, rf.commitIndex-rf.lastApplied)
 		for i := 0; rf.lastApplied < rf.commitIndex; i++ {
@@ -675,7 +666,6 @@ func (rf *Raft) apply() {
 			rf.applyCh <- i
 		}
 	}
-
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -687,9 +677,9 @@ func (rf *Raft) apply() {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-func (rf *Raft) timeHandle() {
+func (rf *Raft) timing() {
 	for rf.killed() == false {
-		time.Sleep(time.Duration(2) * time.Millisecond)
+		time.Sleep(time.Duration(1) * time.Millisecond)
 		rf.mu.Lock()
 		if time.Since(rf.lastReceiveTime).Milliseconds() > rf.timeout.Milliseconds() {
 			rf.mu.Unlock()
@@ -700,140 +690,89 @@ func (rf *Raft) timeHandle() {
 	}
 }
 
-func (rf *Raft) timeoutHandle() {
-	rf.mu.Lock()
-	if rf.serverstate == serverstate.follower {
-		Debug(dVote, "S%d Follower, Starting Election", rf.me)
-		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
-		rf.lastReceiveTime = time.Now()
-		rf.serverstate = serverstate.candidate
-		rf.votedFor = rf.me
-		rf.currentTerm++
-		rf.ballot = 0
-		rf.ballot++
-		haschange := true
-		rf.persistHandle(&haschange)
+func (rf *Raft) electionHandle() {
+	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+	rf.lastReceiveTime = time.Now()
+	rf.serverstate = serverstate.candidate
+	rf.votedFor = rf.me
+	rf.currentTerm++
+	rf.ballot = 0
+	rf.ballot++
+	for server := 0; server < len(rf.peers); server++ {
+		if server != rf.me {
+			go rf.sendRequestVote(server, RequestVoteArgs{
+				Term:         rf.currentTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: len(rf.log) - 1,
+				LastLogTerm:  rf.log[len(rf.log)-1].Term,
+			})
+		}
+	}
+}
 
-		Term := rf.currentTerm
-		LastLogIndex := len(rf.log) - 1
-		LastLogTerm := rf.log[len(rf.log)-1].Term
-		rf.mu.Unlock()
-		for server := 0; server < len(rf.peers); server++ {
-			if server != rf.me {
-				go rf.sendRequestVote(server, RequestVoteArgs{
-					Term:         Term,
-					CandidateId:  rf.me,
-					LastLogIndex: LastLogIndex,
-					LastLogTerm:  LastLogTerm,
+func (rf *Raft) appendEntriesHandle(servers []int) {
+	rf.timeout = time.Duration(150) * time.Millisecond
+	rf.lastReceiveTime = time.Now()
+	Entries := make([]Log, len(rf.log))
+	copy(Entries, rf.log)
+	for server := 0; server < len(servers); server++ {
+		if servers[server] != rf.me {
+			if len(rf.log) - 1 >= rf.nextIndex[servers[server]] - 1 {
+				Debug(dLeader, "S%d Leader, sendAppendEntries in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, servers[server], rf.nextIndex[servers[server]]-1)
+				go rf.sendAppendEntries(servers[server], AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[servers[server]]-1,
+					PrevLogTerm:  rf.log[rf.nextIndex[servers[server]]-1].Term,
+					Entries:      Entries[rf.nextIndex[servers[server]]:],
+					LeaderCommit: rf.commitIndex,
 				})
-			}
-		}
-	} else if rf.serverstate == serverstate.candidate {
-		Debug(dVote, "S%d Candidate, Not Achieved Majority for T%d (%d) continuing to elect", rf.me, rf.currentTerm, rf.ballot)
-		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
-		rf.lastReceiveTime = time.Now()
-		rf.currentTerm++
-		rf.ballot = 0
-		rf.ballot++
-		haschange := true
-		rf.persistHandle(&haschange)
-
-		Term := rf.currentTerm
-		LastLogIndex := len(rf.log) - 1
-		LastLogTerm := rf.log[len(rf.log)-1].Term
-		rf.mu.Unlock()
-		for server := 0; server < len(rf.peers); server++ {
-			if server != rf.me {
-				go rf.sendRequestVote(server, RequestVoteArgs{
-					Term:         Term,
-					CandidateId:  rf.me,
-					LastLogIndex: LastLogIndex,
-					LastLogTerm:  LastLogTerm,
+			} else {
+				go rf.sendHeartBeat(servers[server], AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[servers[server]]-1,
+					PrevLogTerm:  rf.log[rf.nextIndex[servers[server]]-1].Term,
+					LeaderCommit: rf.commitIndex,
 				})
-			}
-		}
-	} else {
-		Debug(dLeader, "S%d Leader, sendAppendEntries in T%d", rf.me, rf.currentTerm)
-		rf.timeout = time.Duration(150) * time.Millisecond
-		rf.lastReceiveTime = time.Now()
-
-		length := len(rf.log) - 1
-		Entries := make([]Log, len(rf.log))
-		copy(Entries, rf.log)
-		Term := rf.currentTerm
-		PrevLogIndex := make([]int, len(rf.peers))
-		PrevLogTerm := make([]int, len(rf.peers))
-		for server := 0; server < len(rf.peers); server++ {
-			if server != rf.me {
-				PrevLogIndex[server] = rf.nextIndex[server] - 1
-				PrevLogTerm[server] = rf.log[rf.nextIndex[server]-1].Term
-			}
-		}
-		LeaderCommit := rf.commitIndex
-		rf.mu.Unlock()
-		for server := 0; server < len(rf.peers); server++ {
-			if server != rf.me {
-				if length >= PrevLogIndex[server] {
-					Debug(dLeader, "S%d Leader, sendAppendEntries in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, server, PrevLogIndex[server])
-					go rf.sendAppendEntries(server, AppendEntriesArgs{
-						Term:         Term,
-						LeaderId:     rf.me,
-						PrevLogIndex: PrevLogIndex[server],
-						PrevLogTerm:  PrevLogTerm[server],
-						Entries:      Entries[PrevLogIndex[server]+1:],
-						LeaderCommit: LeaderCommit,
-					})
-				} else {
-					go rf.sendHeartBeat(server, AppendEntriesArgs{
-						Term:         Term,
-						LeaderId:     rf.me,
-						PrevLogIndex: PrevLogIndex[server],
-						PrevLogTerm:  PrevLogTerm[server],
-						LeaderCommit: LeaderCommit,
-					})
-				}
 			}
 		}
 	}
 }
 
-func (rf *Raft) quickreHandle(servers []int) {
+func (rf *Raft) timeoutHandle() {
 	rf.mu.Lock()
-	Debug(dLeader, "S%d Leader, sendAppendEntries(quickreHandle) in T%d", rf.me, rf.currentTerm)
-	length := len(rf.log) - 1
-	Entries := make([]Log, len(rf.log))
-	copy(Entries, rf.log)
-	Term := rf.currentTerm
-	PrevLogIndex := make([]int, len(servers))
-	PrevLogTerm := make([]int, len(servers))
-	for server := 0; server < len(servers); server++ {
-		PrevLogIndex[server] = rf.nextIndex[servers[server]] - 1
-		PrevLogTerm[server] = rf.log[rf.nextIndex[servers[server]]-1].Term
-	}
-	LeaderCommit := rf.commitIndex
-	rf.mu.Unlock()
-	for server := 0; server < len(servers); server++ {
-		if servers[server] != rf.me {
-			if length >= PrevLogIndex[server] {
-				Debug(dLeader, "S%d Leader, sendAppendEntries(quickreHandle) in T%d to S%d PrevLogIndex=%d", rf.me, rf.currentTerm, servers[server], PrevLogIndex[server])
-				go rf.sendAppendEntries(servers[server], AppendEntriesArgs{
-					Term:         Term,
-					LeaderId:     rf.me,
-					PrevLogIndex: PrevLogIndex[server],
-					PrevLogTerm:  PrevLogTerm[server],
-					Entries:      Entries[PrevLogIndex[server]+1:],
-					LeaderCommit: LeaderCommit,
-				})
-			} else {
-				go rf.sendHeartBeat(servers[server], AppendEntriesArgs{
-					Term:         Term,
-					LeaderId:     rf.me,
-					PrevLogIndex: PrevLogIndex[server],
-					PrevLogTerm:  PrevLogTerm[server],
-					LeaderCommit: LeaderCommit,
-				})
+	defer rf.mu.Unlock()
+	haschange := false
+	defer rf.persistHandle(&haschange)
+	if rf.serverstate == serverstate.follower {
+		Debug(dVote, "S%d Follower, Starting Election", rf.me)
+		haschange = true
+		rf.electionHandle()
+	} else if rf.serverstate == serverstate.candidate {
+		Debug(dVote, "S%d Candidate, Not Achieved Majority for T%d (%d) continuing to elect", rf.me, rf.currentTerm, rf.ballot)
+		haschange = true
+		rf.electionHandle()
+	} else {
+		Debug(dLeader, "S%d Leader, sendAppendEntries in T%d", rf.me, rf.currentTerm)
+		servers := []int{}
+		for server := 0; server < len(rf.peers); server++ {
+			if server != rf.me {
+				servers = append(servers, server)
 			}
 		}
+		rf.appendEntriesHandle(servers)
+	}
+}
+
+func (rf *Raft) quickreHandle(servers []int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	haschange := false
+	defer rf.persistHandle(&haschange)
+	if rf.serverstate == serverstate.leader {
+		Debug(dLeader, "S%d Leader, sendAppendEntries(quickreHandle) in T%d", rf.me, rf.currentTerm)
+		rf.appendEntriesHandle(servers)
 	}
 }
 
@@ -853,11 +792,16 @@ func (rf *Raft) ticker() {
 	// Check if a leader election should be started.
 	for rf.killed() == false {
 		select {
-		case <-rf.timeCh : 
+		case <-rf.timeCh:
 			go rf.timeoutHandle()
-		case servers := <-rf.quickreCh :
+		case server := <-rf.quickreCh:
+			servers := []int{server}
+			for len(rf.quickreCh) > 0 {
+				servers = append(servers, <-rf.quickreCh)
+			}
+			servers = RemoveRep(servers)
 			go rf.quickreHandle(servers)
-		case <-time.After(time.Duration(10) * time.Millisecond) :
+		case <-time.After(time.Duration(10) * time.Millisecond):
 		}
 	}
 	if len(rf.timeCh) > 0 {
@@ -901,10 +845,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
 	rf.ballot = 0
 	rf.timeCh = make(chan int)
-	rf.quickreCh = make(chan []int, len(rf.peers))
+	rf.quickreCh = make(chan int, 2*(len(rf.peers)-1))
 
 	// start ticker goroutine to start elections
-	go rf.timeHandle()
+	go rf.timing()
 	go rf.ticker()
 	go rf.apply()
 
