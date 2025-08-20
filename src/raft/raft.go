@@ -421,15 +421,10 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 					rf.matchIndex[server] = 0
 				}
 			}
-			rf.timeout = time.Duration(150) * time.Millisecond
+			rf.timeout = time.Duration(0) * time.Millisecond
 			rf.lastReceiveTime = time.Now()
 			rf.persistHandle(&haschange)
 			rf.mu.Unlock()
-			for server := 0; server < len(rf.peers); server++ {
-				if server != rf.me {
-					rf.quickreCh <- server
-				}
-			}
 		} else {
 			rf.persistHandle(&haschange)
 			rf.mu.Unlock()
@@ -478,9 +473,16 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 	if reply.Success {
 		rf.matchIndex[server] = Max(args.PrevLogIndex+len(args.Entries), rf.matchIndex[server])
 		rf.nextIndex[server] = Max(args.PrevLogIndex+len(args.Entries)+1, rf.nextIndex[server])
-		rf.commitHandle(rf.matchIndex[server])
+		ischange := rf.commitHandle(rf.matchIndex[server])
 		rf.persistHandle(&haschange)
 		rf.mu.Unlock()
+		if ischange {
+			for server := 0; server < len(rf.peers); server++ {
+				if server != rf.me {
+					rf.quickreCh <- server
+				}
+			}
+		}
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
 		rf.persistHandle(&haschange)
@@ -526,9 +528,16 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 	if reply.Success {
 		rf.matchIndex[server] = Max(args.PrevLogIndex, rf.matchIndex[server])
 		rf.nextIndex[server] = Max(args.PrevLogIndex+1, rf.nextIndex[server])
-		rf.commitHandle(rf.matchIndex[server])
+		ischange := rf.commitHandle(rf.matchIndex[server])
 		rf.persistHandle(&haschange)
 		rf.mu.Unlock()
+		if ischange {
+			for server := 0; server < len(rf.peers); server++ {
+				if server != rf.me {
+					rf.quickreCh <- server
+				}
+			}
+		}
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
 		rf.persistHandle(&haschange)
@@ -537,7 +546,8 @@ func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
 	}
 }
 
-func (rf *Raft) commitHandle(matchIndex int) {
+func (rf *Raft) commitHandle(matchIndex int) bool {
+	ischange := false
 	for index := matchIndex; index > rf.commitIndex; index-- {
 		if rf.log[index].Term < rf.currentTerm {
 			break
@@ -554,12 +564,14 @@ func (rf *Raft) commitHandle(matchIndex int) {
 			}
 		}
 		if majority >= len(rf.peers)/2+1 {
+			ischange = true
 			rf.commitIndex = index
 			rf.cond.Signal()
 			Debug(dCommit, "S%d commitIndex %d %v", rf.me, rf.commitIndex, rf.log[rf.commitIndex].Entry)
 			break
 		}
 	}
+	return ischange
 }
 
 func (rf *Raft) conflictHandle1(conflictIndex int, conflictTerm int) int {
@@ -679,7 +691,7 @@ func (rf *Raft) apply() {
 // should call killed() to check whether it should stop.
 func (rf *Raft) timing() {
 	for rf.killed() == false {
-		time.Sleep(time.Duration(1) * time.Millisecond)
+		time.Sleep(time.Duration(5) * time.Millisecond)
 		rf.mu.Lock()
 		if time.Since(rf.lastReceiveTime).Milliseconds() > rf.timeout.Milliseconds() {
 			rf.mu.Unlock()
