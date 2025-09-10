@@ -3,26 +3,32 @@ echo "===== the test start ====="
 
 start_time=$(date +%s.%N)
 tmpdir=$(mktemp -d)
-for i in {0..9}; do
-    (
-        time go test -run 2C
-        if [ $? -eq 0 ]; then
-            echo "1" > "$tmpdir/$i"
-        else
-            echo "2" > "$tmpdir/$i"
-        fi
-    ) > "test/testlog_$i" 2>&1 &
+iternum=({0..0})
+process_num=({0..5})
+for x in ${iternum[@]}; do
+    for i in ${process_num[@]}; do
+        (
+            time go test -run 2D
+            if [ $? -eq 0 ]; then
+                echo "1" > "$tmpdir/`expr $x \* ${#process_num[@]} \+ $i`"
+            else
+                echo "2" > "$tmpdir/`expr $x \* ${#process_num[@]} \+ $i`"
+            fi
+        ) > "test/testlog_`expr $x \* ${#process_num[@]} \+ $i`" 2>&1 &
+    done
+    wait
 done
 
-wait
 end_time=$(date +%s.%N)
 result=()
-for i in {0..9}; do
-    if [ -f "$tmpdir/$i" ]; then
-        result[$i]=$(<"$tmpdir/$i")
-    else
-        result[$i]="2"
-    fi
+for x in ${iternum[@]}; do
+    for i in ${process_num[@]}; do
+        if [ -f "$tmpdir/`expr $x \* ${#process_num[@]} \+ $i`" ]; then
+            result[`expr $x \* ${#process_num[@]} \+ $i`]=$(<"$tmpdir/`expr $x \* ${#process_num[@]} \+ $i`")
+        else
+            result[`expr $x \* ${#process_num[@]} \+ $i`]="0"
+        fi
+    done
 done
 
 success_count=0
@@ -42,3 +48,5 @@ echo "SUCCESS $success_count"
 echo "FAIL $fail_count"
 echo "ERROR $error_count"
 echo "elasp time: $(echo "$end_time - $start_time" | bc) secs"
+
+echo "===== the test end ====="
