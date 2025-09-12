@@ -3,12 +3,12 @@ echo "===== the test start ====="
 
 start_time=$(date +%s.%N)
 tmpdir=$(mktemp -d)
-iternum=({0..0})
-process_num=({0..5})
+iternum=({0..1})
+process_num=({0..74})
 for x in ${iternum[@]}; do
     for i in ${process_num[@]}; do
         (
-            time go test -run 2D
+            time go test -run 2C
             if [ $? -eq 0 ]; then
                 echo "1" > "$tmpdir/`expr $x \* ${#process_num[@]} \+ $i`"
             else

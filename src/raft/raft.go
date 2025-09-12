@@ -21,7 +21,6 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"bytes"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,6 +56,12 @@ type Snapshot struct {
 	lastIncludedIndex int
 	lastIncludedTerm  int
 	data              []byte
+}
+
+type Unreliable struct {
+	unreliableCnt []int
+	crashPeer     []bool
+	unreliablemu  []sync.Mutex
 }
 
 type stateType int
@@ -99,9 +104,14 @@ type Raft struct {
 	lastReceiveTime time.Time
 	timeout         time.Duration
 	serverstate     stateType
-	ballot          int
-	timeCh          chan int
-	quickreCh       chan int
+	ballot          []bool
+
+	timeCh      chan int
+	quickreCh   chan int
+	quickVoteCh chan int
+
+	unreliableInterval time.Duration
+	unreliable         Unreliable
 }
 
 // return currentTerm and whether this server
@@ -293,7 +303,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.votedFor = args.CandidateId
 				haschange = true
 			}
-			rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+			rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 			rf.lastReceiveTime = time.Now()
 		} else {
 			Debug(dVote, "S%d Not Vote For S%d (rf.votedFor == -1 || rf.votedFor == args.CandidateId)", rf.me, args.CandidateId)
@@ -331,7 +341,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+	rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 	rf.lastReceiveTime = time.Now()
 	if args.PrevLogIndex < rf.snapshot.lastIncludedIndex {
 		Debug(dLog2, "S%d Got AppendEntries From S%d (args.PrevLogIndex < rf.snapshot.lastIncludedIndex)", rf.me, args.LeaderId)
@@ -340,10 +350,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	if args.PrevLogIndex - rf.snapshot.lastIncludedIndex > len(rf.log)-1 || args.PrevLogTerm != rf.getTerm(args.PrevLogIndex) {
+	if args.PrevLogIndex-rf.snapshot.lastIncludedIndex > len(rf.log)-1 || args.PrevLogTerm != rf.getTerm(args.PrevLogIndex) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		if args.PrevLogIndex - rf.snapshot.lastIncludedIndex > len(rf.log)-1 {
+		if args.PrevLogIndex-rf.snapshot.lastIncludedIndex > len(rf.log)-1 {
 			reply.ConflictIndex = len(rf.log) + rf.snapshot.lastIncludedIndex
 			reply.ConflictTerm = -1
 		} else {
@@ -411,7 +421,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
-	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+	rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 	rf.lastReceiveTime = time.Now()
 	Debug(dSnap, "S%d Got InstallSnapshot From S%d, rf.snapshot.lastIncludedIndex = %d rf.snapshot.lastIncludedTerm = %d", rf.me, args.LeaderId, rf.snapshot.lastIncludedIndex, rf.snapshot.lastIncludedTerm)
 	haschange = true
@@ -434,7 +444,7 @@ func (rf *Raft) conflictHandle2(prevLogIndex int, conflictTerm int) int {
 	low := rf.snapshot.lastIncludedIndex
 	high := prevLogIndex
 	middle := (low + high) / 2
-	answer := -1 
+	answer := -1
 	for {
 		if high-low > 1 {
 			if rf.log[middle-rf.snapshot.lastIncludedIndex].Term < conflictTerm {
@@ -455,8 +465,8 @@ func (rf *Raft) conflictHandle2(prevLogIndex int, conflictTerm int) int {
 			}
 		}
 	}
-	
-	if (answer == -1) {
+
+	if answer == -1 {
 		panic("conflictHandle2")
 	}
 
@@ -466,14 +476,14 @@ func (rf *Raft) conflictHandle2(prevLogIndex int, conflictTerm int) int {
 
 func (rf *Raft) getTerm(index int) int {
 	if index < rf.snapshot.lastIncludedIndex {
-		Debug(dError, "S%d getTerm(%d) rf.snapshot.lastIncludedIndex = %d", rf.me, index ,rf.snapshot.lastIncludedIndex)
+		Debug(dError, "S%d getTerm(%d) rf.snapshot.lastIncludedIndex = %d", rf.me, index, rf.snapshot.lastIncludedIndex)
 		panic("getTerm")
 	}
 
 	if index == rf.snapshot.lastIncludedIndex {
-		return rf.snapshot.lastIncludedTerm;
+		return rf.snapshot.lastIncludedTerm
 	} else {
-		return rf.log[index-rf.snapshot.lastIncludedIndex].Term;
+		return rf.log[index-rf.snapshot.lastIncludedIndex].Term
 	}
 }
 
@@ -506,24 +516,66 @@ func (rf *Raft) getTerm(index int) int {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 	reply := RequestVoteReply{}
-	Debug(dVote, "S%d -> S%d, Sending RequestVote", rf.me, server)
+
+	unreliableCh := make(chan int, 1)
+	rf.unreliable.unreliablemu[server].Lock()
+	if !rf.unreliable.crashPeer[server] {
+		rf.unreliable.unreliablemu[server].Unlock()
+		go func() {
+			time.Sleep(rf.unreliableInterval)
+			rf.unreliable.unreliablemu[server].Lock()
+			if rf.unreliable.crashPeer[server] {
+				rf.unreliable.unreliablemu[server].Unlock()
+				return
+			}
+			if len(unreliableCh) > 0 {
+				rf.unreliable.unreliablemu[server].Unlock()
+				return
+			}
+			rf.unreliable.unreliableCnt[server]++
+			Debug(dVote, "S%d -> S%d quickVote, rf.unreliable.unreliableCnt[server] = %d", rf.me, server, rf.unreliable.unreliableCnt[server])
+			iscrash := (rf.unreliable.unreliableCnt[server] >= 3)
+			if iscrash {
+				rf.unreliable.crashPeer[server] = true
+			}
+			rf.unreliable.unreliablemu[server].Unlock()
+			if !iscrash {
+				select {
+				case rf.quickVoteCh <- server:
+				default:
+				}
+			}
+		}()
+	} else {
+		rf.unreliable.unreliablemu[server].Unlock()
+	}
 
 	if ok := rf.peers[server].Call("Raft.RequestVote", &args, &reply); !ok {
+		unreliableCh <- -1
+		rf.unreliable.unreliablemu[server].Lock()
+		rf.unreliable.crashPeer[server] = true
+		rf.unreliable.unreliableCnt[server] = 0
+		rf.unreliable.unreliablemu[server].Unlock()
 		return
 	}
 
+	unreliableCh <- -1
+	rf.unreliable.unreliablemu[server].Lock()
+	rf.unreliable.crashPeer[server] = false
+	rf.unreliable.unreliableCnt[server] = 0
+	rf.unreliable.unreliablemu[server].Unlock()
+
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	haschange := false
+	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.candidate {
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term != rf.currentTerm {
 		Debug(dVote, "S%d <- S%d, Not Got Vote (args.Term != rf.currentTerm)", rf.me, server)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
@@ -533,23 +585,29 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 		rf.serverstate = serverstate.follower
 		rf.votedFor = -1
 		haschange = true
-		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+		rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 		rf.lastReceiveTime = time.Now()
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
 	if reply.VoteGranted {
 		Debug(dVote, "S%d <- S%d, Got Vote", rf.me, server)
-		rf.ballot++
-		if rf.ballot >= len(rf.peers)/2+1 {
-			Debug(dVote, "S%d Candidate, Achieved Majority for T%d (%d), converting to Leader", rf.me, rf.currentTerm, rf.ballot)
+		rf.ballot[server] = true
+		ballot := 1
+		for i := 0; i < len(rf.peers); i++ {
+			if i != rf.me {
+				if rf.ballot[i] {
+					ballot++
+				}
+			}
+		}
+		if ballot >= len(rf.peers)/2+1 {
+			Debug(dVote, "S%d Candidate, Achieved Majority for T%d (%d), converting to Leader", rf.me, rf.currentTerm, ballot)
 			rf.serverstate = serverstate.leader
 			rf.nextIndex = make([]int, len(rf.peers))
 			for server := 0; server < len(rf.peers); server++ {
 				if server != rf.me {
-					rf.nextIndex[server] = len(rf.log)+rf.snapshot.lastIncludedIndex
+					rf.nextIndex[server] = len(rf.log) + rf.snapshot.lastIncludedIndex
 				}
 			}
 			rf.matchIndex = make([]int, len(rf.peers))
@@ -558,44 +616,88 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs) {
 					rf.matchIndex[server] = rf.snapshot.lastIncludedIndex
 				}
 			}
-			rf.timeout = time.Duration(150) * time.Millisecond
+
+			rf.timeout = time.Duration(GetHeartBeatTime()) * time.Millisecond
 			rf.lastReceiveTime = time.Now()
-			rf.persistHandle(&haschange)
-			rf.mu.Unlock()
+
 			for server := 0; server < len(rf.peers); server++ {
 				if server != rf.me {
-					rf.quickreCh <- server
+					select {
+					case rf.quickreCh <- server:
+					default:
+					}
 				}
 			}
-		} else {
-			rf.persistHandle(&haschange)
-			rf.mu.Unlock()
 		}
 	} else {
 		Debug(dVote, "S%d <- S%d, Not Got Vote", rf.me, server)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
+
+	unreliableCh := make(chan int, 1)
+	rf.unreliable.unreliablemu[server].Lock()
+	if !rf.unreliable.crashPeer[server] {
+		rf.unreliable.unreliablemu[server].Unlock()
+		go func() {
+			time.Sleep(rf.unreliableInterval)
+			rf.unreliable.unreliablemu[server].Lock()
+			if rf.unreliable.crashPeer[server] {
+				rf.unreliable.unreliablemu[server].Unlock()
+				return
+			}
+			if len(unreliableCh) > 0 {
+				rf.unreliable.unreliablemu[server].Unlock()
+				return
+			}
+
+			rf.unreliable.unreliableCnt[server]++
+			iscrach := (rf.unreliable.unreliableCnt[server] >= 3)
+			if iscrach {
+				rf.unreliable.crashPeer[server] = true
+			}
+			rf.unreliable.unreliablemu[server].Unlock()
+			if !iscrach {
+				Debug(dLog2, "S%d -> S%d sendAppendEntries(!iscrach)", rf.me, server)
+				select {
+				case rf.quickreCh <- server:
+				default:
+				}
+			}
+		}()
+	} else {
+		rf.unreliable.unreliablemu[server].Unlock()
+	}
+
 	if ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply); !ok {
+		unreliableCh <- -1
+		rf.unreliable.unreliablemu[server].Lock()
+		rf.unreliable.crashPeer[server] = true
+		rf.unreliable.unreliableCnt[server] = 0
+		rf.unreliable.unreliablemu[server].Unlock()
 		return
 	}
 
+	unreliableCh <- -1
+	rf.unreliable.unreliablemu[server].Lock()
+	iscrash := rf.unreliable.crashPeer[server]
+	rf.unreliable.crashPeer[server] = false
+	rf.unreliable.unreliableCnt[server] = 0
+	rf.unreliable.unreliablemu[server].Unlock()
+
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	haschange := false
+	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.leader {
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term != rf.currentTerm {
 		Debug(dLog2, "S%d <- S%d (args.Term != rf.currentTerm)", rf.me, server)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
@@ -605,10 +707,8 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 		rf.serverstate = serverstate.follower
 		rf.votedFor = -1
 		haschange = true
-		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+		rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 		rf.lastReceiveTime = time.Now()
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
@@ -616,96 +716,97 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs) {
 		rf.matchIndex[server] = Max(args.PrevLogIndex+len(args.Entries), rf.matchIndex[server])
 		rf.nextIndex[server] = Max(args.PrevLogIndex+len(args.Entries)+1, rf.nextIndex[server])
 		ischange := rf.commitHandle(rf.matchIndex[server])
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		if ischange {
 			for server := 0; server < len(rf.peers); server++ {
 				if server != rf.me {
-					rf.quickreCh <- server
+					select {
+					case rf.quickreCh <- server:
+					default:
+					}
 				}
 			}
+			return
 		}
 	} else {
 		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
-		rf.quickreCh <- server
-	}
-}
-
-func (rf *Raft) sendHeartBeat(server int, args AppendEntriesArgs) {
-	reply := AppendEntriesReply{}
-	if ok := rf.peers[server].Call("Raft.AppendEntries", &args, &reply); !ok {
-		return
-	}
-
-	rf.mu.Lock()
-	haschange := false
-	if rf.serverstate != serverstate.leader {
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
-		return
-	}
-
-	if args.Term != rf.currentTerm {
-		Debug(dLeader, "S%d <- S%d (args.Term != rf.currentTerm)", rf.me, server)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
-		return
-	}
-
-	if reply.Term > rf.currentTerm {
-		Debug(dLeader, "S%d <- S%d (reply.Term > rf.currentTerm)", rf.me, server)
-		rf.currentTerm = reply.Term
-		rf.serverstate = serverstate.follower
-		rf.votedFor = -1
-		haschange = true
-		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
-		rf.lastReceiveTime = time.Now()
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
-		return
-	}
-
-	if reply.Success {
-		rf.matchIndex[server] = Max(args.PrevLogIndex, rf.matchIndex[server])
-		rf.nextIndex[server] = Max(args.PrevLogIndex+1, rf.nextIndex[server])
-		ischange := rf.commitHandle(rf.matchIndex[server])
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
-		if ischange {
-			for server := 0; server < len(rf.peers); server++ {
-				if server != rf.me {
-					rf.quickreCh <- server
-				}
-			}
+		select {
+		case rf.quickreCh <- server:
+		default:
 		}
-	} else {
-		rf.nextIndex[server] = rf.conflictHandle1(reply.ConflictIndex, reply.ConflictTerm)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
-		rf.quickreCh <- server
+		return
+	}
+
+	if iscrash {
+		Debug(dLog2, "S%d -> S%d sendAppendEntries(iscrach)", rf.me, server)
+		select {
+		case rf.quickreCh <- server:
+		default:
+		}
 	}
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs) {
 	reply := InstallSnapshotReply{}
+
+	unreliableCh := make(chan int, 1)
+	rf.unreliable.unreliablemu[server].Lock()
+	if !rf.unreliable.crashPeer[server] {
+		rf.unreliable.unreliablemu[server].Unlock()
+		go func() {
+			time.Sleep(rf.unreliableInterval)
+			rf.unreliable.unreliablemu[server].Lock()
+			if rf.unreliable.crashPeer[server] {
+				rf.unreliable.unreliablemu[server].Unlock()
+				return
+			}
+			if len(unreliableCh) > 0 {
+				rf.unreliable.unreliablemu[server].Unlock()
+				return
+			}
+
+			rf.unreliable.unreliableCnt[server]++
+			iscrach := (rf.unreliable.unreliableCnt[server] >= 3)
+			if iscrach {
+				rf.unreliable.crashPeer[server] = true
+			}
+			rf.unreliable.unreliablemu[server].Unlock()
+			if !iscrach {
+				Debug(dLog2, "S%d -> S%d sendInstallSnapshot(!iscrach)", rf.me, server)
+				select {
+				case rf.quickreCh <- server:
+				default:
+				}
+			}
+		}()
+	} else {
+		rf.unreliable.unreliablemu[server].Unlock()
+	}
+
 	if ok := rf.peers[server].Call("Raft.InstallSnapshot", &args, &reply); !ok {
+		unreliableCh <- -1
+		rf.unreliable.unreliablemu[server].Lock()
+		rf.unreliable.crashPeer[server] = true
+		rf.unreliable.unreliableCnt[server] = 0
+		rf.unreliable.unreliablemu[server].Unlock()
 		return
 	}
 
+	unreliableCh <- -1
+	rf.unreliable.unreliablemu[server].Lock()
+	rf.unreliable.crashPeer[server] = false
+	rf.unreliable.unreliableCnt[server] = 0
+	rf.unreliable.unreliablemu[server].Unlock()
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	haschange := false
+	defer rf.persistHandle(&haschange)
 	if rf.serverstate != serverstate.leader {
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
 	if args.Term != rf.currentTerm {
 		Debug(dLeader, "S%d <- S%d (args.Term != rf.currentTerm)", rf.me, server)
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
@@ -715,17 +816,17 @@ func (rf *Raft) sendInstallSnapshot(server int, args InstallSnapshotArgs) {
 		rf.serverstate = serverstate.follower
 		rf.votedFor = -1
 		haschange = true
-		rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+		rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 		rf.lastReceiveTime = time.Now()
-		rf.persistHandle(&haschange)
-		rf.mu.Unlock()
 		return
 	}
 
 	rf.matchIndex[server] = Max(args.LastIncludedIndex, rf.matchIndex[server])
 	rf.nextIndex[server] = Max(args.LastIncludedIndex+1, rf.nextIndex[server])
-	rf.persistHandle(&haschange)
-	rf.mu.Unlock()
+	select {
+	case rf.quickreCh <- server:
+	default:
+	}
 }
 
 func (rf *Raft) commitHandle(matchIndex int) bool {
@@ -762,7 +863,7 @@ func (rf *Raft) conflictHandle1(conflictIndex int, conflictTerm int) int {
 	}
 
 	low := rf.snapshot.lastIncludedIndex + 1
-	high := rf.snapshot.lastIncludedIndex + len(rf.log) 
+	high := rf.snapshot.lastIncludedIndex + len(rf.log)
 	middle := (low + high) / 2
 	answer := -1
 	for {
@@ -776,7 +877,7 @@ func (rf *Raft) conflictHandle1(conflictIndex int, conflictTerm int) int {
 			}
 			middle = (low + high) / 2
 		} else {
-			if low-rf.snapshot.lastIncludedIndex > len(rf.log)-1 { 
+			if low-rf.snapshot.lastIncludedIndex > len(rf.log)-1 {
 				// In this case it can't find conflictTerm in rf.log, and then it will return conflictIndex.
 				answer = low
 				break
@@ -841,7 +942,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 	for server := 0; server < len(rf.peers); server++ {
 		if server != rf.me {
-			rf.quickreCh <- server
+			select {
+			case rf.quickreCh <- server:
+			default:
+			}
 		}
 	}
 	return length, currentTerm, true
@@ -861,8 +965,8 @@ func (rf *Raft) apply() {
 			m = append(m, ApplyMsg{
 				SnapshotValid: true,
 				Snapshot:      Snapshot,
-				SnapshotTerm:   rf.snapshot.lastIncludedTerm,
-				SnapshotIndex:  rf.snapshot.lastIncludedIndex,
+				SnapshotTerm:  rf.snapshot.lastIncludedTerm,
+				SnapshotIndex: rf.snapshot.lastIncludedIndex,
 			})
 			Debug(dCommit, "S%d Apply Snapshot, SnapshotIndex = %d SnapshotTerm = %d", rf.me, rf.snapshot.lastIncludedIndex, rf.snapshot.lastIncludedTerm)
 		}
@@ -897,7 +1001,10 @@ func (rf *Raft) timing() {
 		rf.mu.Lock()
 		if time.Since(rf.lastReceiveTime).Milliseconds() > rf.timeout.Milliseconds() {
 			rf.mu.Unlock()
-			rf.timeCh <- -1
+			select {
+			case rf.timeCh <- -1:
+			default:
+			}
 		} else {
 			rf.mu.Unlock()
 		}
@@ -905,27 +1012,27 @@ func (rf *Raft) timing() {
 }
 
 func (rf *Raft) electionHandle() {
-	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
+	rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
 	rf.lastReceiveTime = time.Now()
 	rf.serverstate = serverstate.candidate
 	rf.votedFor = rf.me
 	rf.currentTerm++
-	rf.ballot = 0
-	rf.ballot++
+	rf.ballot = make([]bool, len(rf.peers))
 	for server := 0; server < len(rf.peers); server++ {
 		if server != rf.me {
+			Debug(dVote, "S%d -> S%d, Sending RequestVote", rf.me, server)
 			go rf.sendRequestVote(server, RequestVoteArgs{
 				Term:         rf.currentTerm,
 				CandidateId:  rf.me,
 				LastLogIndex: len(rf.log) - 1 + rf.snapshot.lastIncludedIndex,
-				LastLogTerm:  rf.getTerm(len(rf.log)-1+rf.snapshot.lastIncludedIndex),
+				LastLogTerm:  rf.getTerm(len(rf.log) - 1 + rf.snapshot.lastIncludedIndex),
 			})
 		}
 	}
 }
 
 func (rf *Raft) appendEntriesHandle(servers []int) {
-	rf.timeout = time.Duration(150) * time.Millisecond
+	rf.timeout = time.Duration(GetHeartBeatTime()) * time.Millisecond
 	rf.lastReceiveTime = time.Now()
 	Entries := make([]Log, len(rf.log))
 	copy(Entries, rf.log)
@@ -948,17 +1055,17 @@ func (rf *Raft) appendEntriesHandle(servers []int) {
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[servers[server]] - 1,
-					PrevLogTerm:  rf.getTerm(rf.nextIndex[servers[server]]-1),
+					PrevLogTerm:  rf.getTerm(rf.nextIndex[servers[server]] - 1),
 					Entries:      Entries[rf.nextIndex[servers[server]]-rf.snapshot.lastIncludedIndex:],
 					LeaderCommit: rf.commitIndex,
 				})
 			} else {
 				Debug(dLog2, "S%d Leader, sendHeartBeat in T%d to S%d PrevLogIndex = %d", rf.me, rf.currentTerm, servers[server], rf.nextIndex[servers[server]]-1)
-				go rf.sendHeartBeat(servers[server], AppendEntriesArgs{
+				go rf.sendAppendEntries(servers[server], AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[servers[server]] - 1,
-					PrevLogTerm:  rf.getTerm(rf.nextIndex[servers[server]]-1),
+					PrevLogTerm:  rf.getTerm(rf.nextIndex[servers[server]] - 1),
 					LeaderCommit: rf.commitIndex,
 				})
 			}
@@ -976,7 +1083,15 @@ func (rf *Raft) timeoutHandle() {
 		haschange = true
 		rf.electionHandle()
 	} else if rf.serverstate == serverstate.candidate {
-		Debug(dVote, "S%d Candidate, Not Achieved Majority for T%d (%d) continuing to elect", rf.me, rf.currentTerm, rf.ballot)
+		ballot := 1
+		for i := 0; i < len(rf.peers); i++ {
+			if i != rf.me {
+				if rf.ballot[i] {
+					ballot++
+				}
+			}
+		}
+		Debug(dVote, "S%d Candidate, Not Achieved Majority for T%d (%d) continuing to elect", rf.me, rf.currentTerm, ballot)
 		haschange = true
 		rf.electionHandle()
 	} else {
@@ -988,6 +1103,26 @@ func (rf *Raft) timeoutHandle() {
 			}
 		}
 		rf.appendEntriesHandle(servers)
+	}
+}
+
+func (rf *Raft) quickVoteHandle(servers []int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	haschange := false
+	defer rf.persistHandle(&haschange)
+	if rf.serverstate == serverstate.candidate {
+		for server := 0; server < len(servers); server++ {
+			if server != rf.me {
+				Debug(dVote, "S%d -> S%d, Sending RequestVote(quickVoteHandle)", rf.me, server)
+				go rf.sendRequestVote(server, RequestVoteArgs{
+					Term:         rf.currentTerm,
+					CandidateId:  rf.me,
+					LastLogIndex: len(rf.log) - 1 + rf.snapshot.lastIncludedIndex,
+					LastLogTerm:  rf.getTerm(len(rf.log) - 1 + rf.snapshot.lastIncludedIndex),
+				})
+			}
+		}
 	}
 }
 
@@ -1027,14 +1162,15 @@ func (rf *Raft) ticker() {
 			}
 			servers = RemoveRep(servers)
 			go rf.quickreHandle(servers)
+		case server := <-rf.quickVoteCh:
+			servers := []int{server}
+			for len(rf.quickVoteCh) > 0 {
+				servers = append(servers, <-rf.quickVoteCh)
+			}
+			servers = RemoveRep(servers)
+			go rf.quickVoteHandle(servers)
 		case <-time.After(time.Duration(10) * time.Millisecond):
 		}
-	}
-	if len(rf.timeCh) > 0 {
-		<-rf.timeCh
-	}
-	for len(rf.quickreCh) > 0 {
-		<-rf.quickreCh
 	}
 }
 
@@ -1068,10 +1204,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	rf.lastReceiveTime = time.Now()
-	rf.timeout = time.Duration(180+(rand.Int63()%100)) * time.Millisecond
-	rf.ballot = 0
-	rf.timeCh = make(chan int)
-	rf.quickreCh = make(chan int, 3*(len(rf.peers)-1))
+	rf.timeout = time.Duration(GetRandomTime()) * time.Millisecond
+	rf.ballot = make([]bool, len(rf.peers))
+	rf.timeCh = make(chan int, 1)
+	rf.quickreCh = make(chan int, 4*(len(rf.peers)-1))
+	rf.quickVoteCh = make(chan int, len(rf.peers)-1)
+	rf.unreliableInterval = time.Duration(15) * time.Millisecond
+
+	rf.unreliable = Unreliable{
+		unreliableCnt: make([]int, len(rf.peers)),
+		crashPeer:     make([]bool, len(rf.peers)),
+		unreliablemu:  make([]sync.Mutex, len(rf.peers)),
+	}
 
 	// start ticker goroutine to start elections
 	go rf.timing()

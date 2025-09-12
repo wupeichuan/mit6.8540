@@ -3,6 +3,7 @@ package raft
 import "log"
 import "time"
 import "fmt"
+import "math/rand"
 
 // Debugging
 type logTopic string
@@ -55,6 +56,14 @@ func Max(a int, b int) int {
 	}
 }
 
+func MaxTime(a time.Duration, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
 func RemoveRep(slc []int) []int {
 	result := []int{}
 	tempMap := map[int]byte{}
@@ -65,4 +74,12 @@ func RemoveRep(slc []int) []int {
 		}
 	}
 	return result
+}
+
+func GetRandomTime() int64 {
+	return 210+rand.Int63()%250
+}
+
+func GetHeartBeatTime() int64 {
+	return 150
 }
