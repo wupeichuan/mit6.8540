@@ -11,6 +11,7 @@ import "sync"
 import "sync/atomic"
 import "fmt"
 import "io/ioutil"
+import "6.5840/raft"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -424,6 +425,7 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 
 func TestBasic3A(t *testing.T) {
 	// Test: one client (3A) ...
+	raft.InitDebug()
 	GenericTest(t, "3A", 1, 5, false, false, false, -1, false)
 }
 

@@ -8,7 +8,8 @@ import "math/rand"
 // Debugging
 type logTopic string
 const (
-	dClient  logTopic = "CLNT"
+	DClient  logTopic = "CLNT"
+	DServer  logTopic = "SERV"
 	dCommit  logTopic = "CMIT"
 	dDrop    logTopic = "DROP"
 	dError   logTopic = "ERRO"
@@ -34,10 +35,12 @@ func InitDebug() {
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	time := time.Since(debugStart).Milliseconds()
-	prefix := fmt.Sprintf("%06d %v ", time, string(topic))
-	format = prefix + format
-	log.Printf(format, a...)
+	if topic == DClient || topic == DServer {
+		time := time.Since(debugStart).Milliseconds()
+		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		format = prefix + format
+		log.Printf(format, a...)
+	}
 }
 
 func Min(a int, b int) int {
@@ -80,6 +83,10 @@ func GetRandomTime() int64 {
 	return 210+rand.Int63()%250
 }
 
+func GetLeaderElectionTime() int64 {
+	return 210
+}
+
 func GetHeartBeatTime() int64 {
-	return 150
+	return 140
 }

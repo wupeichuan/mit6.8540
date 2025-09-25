@@ -984,6 +984,7 @@ func (rf *Raft) apply() {
 			rf.applyCh <- i
 		}
 	}
+	close(rf.applyCh)
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
