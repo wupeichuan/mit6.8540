@@ -70,7 +70,6 @@ type ServerState struct {
 	candidate stateType
 	leader    stateType
 }
-
 var serverstate ServerState = ServerState{
 	follower:  0,
 	candidate: 1,
@@ -158,6 +157,12 @@ func (rf *Raft) persist() {
 	}
 }
 
+func (rf *Raft) RaftStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
+}
+
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -203,7 +208,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	haschange := false
 	defer rf.persistHandle(&haschange)
 
-	Debug(dSnap, "S%d Snapshot index = %d", rf.me, index)
+	Debug(dSnap, "S%d Snapshot index = %d, rf.snapshot.lastIncludedIndex = %d", rf.me, index, rf.snapshot.lastIncludedIndex)
 	if index > rf.snapshot.lastIncludedIndex {
 		haschange = true
 		rf.snapshot.lastIncludedTerm = rf.log[index-rf.snapshot.lastIncludedIndex].Term
@@ -211,9 +216,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.log[0] = Log{}
 		rf.snapshot.data = snapshot
 		rf.snapshot.lastIncludedIndex = index
-	} else if index == rf.snapshot.lastIncludedIndex && len(rf.snapshot.data) == 0 {
-		haschange = true
-		rf.snapshot.data = snapshot
 	}
 }
 

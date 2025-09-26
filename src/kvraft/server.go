@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,9 +22,9 @@ type Op struct {
 }
 
 type DuplicateTableTerm struct {
-	sequenceNum int
-	value       string
-	err         Err
+	SequenceNum int
+	Value       string
+	Err         Err
 }
 
 type ApplyList struct {
@@ -46,6 +47,7 @@ type KVServer struct {
 	duplicateTable map[int64]DuplicateTableTerm
 	stateMachine   map[string]string
 	applyList      map[int]chan ApplyList
+	lastApplied    int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -53,13 +55,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	raft.Debug(raft.DServer, "S%d Get, Key = %s, ClientId = %d, SequenceNum = %d", kv.me, args.Key, args.ClientId, args.SequenceNum)
 	if duplicateTableTerm, ok := kv.duplicateTable[args.ClientId]; ok {
-		if args.SequenceNum < duplicateTableTerm.sequenceNum {
+		if args.SequenceNum < duplicateTableTerm.SequenceNum {
 			reply.Err = ErrExpired
 			kv.mu.Unlock()
 			return
-		} else if args.SequenceNum == duplicateTableTerm.sequenceNum {
+		} else if args.SequenceNum == duplicateTableTerm.SequenceNum {
 			reply.Err = OK
-			reply.Value = duplicateTableTerm.value
+			reply.Value = duplicateTableTerm.Value
 			kv.mu.Unlock()
 			return
 		}
@@ -120,11 +122,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	raft.Debug(raft.DServer, "S%d PutAppend, OpType = %s, Key = %s, Value = %s, ClientId = %d, SequenceNum = %d",
 		kv.me, args.Op, args.Key, args.Value, args.ClientId, args.SequenceNum)
 	if duplicateTableTerm, ok := kv.duplicateTable[args.ClientId]; ok {
-		if args.SequenceNum < duplicateTableTerm.sequenceNum {
+		if args.SequenceNum < duplicateTableTerm.SequenceNum {
 			reply.Err = ErrExpired
 			kv.mu.Unlock()
 			return
-		} else if args.SequenceNum == duplicateTableTerm.sequenceNum {
+		} else if args.SequenceNum == duplicateTableTerm.SequenceNum {
 			reply.Err = OK
 			kv.mu.Unlock()
 			return
@@ -203,27 +205,44 @@ func (kv *KVServer) apply() {
 	for kv.killed() == false {
 		if m, ok := <-kv.applyCh; ok {
 			kv.mu.Lock()
+			if m.SnapshotValid {
+				r := bytes.NewBuffer(m.Snapshot)
+				d := labgob.NewDecoder(r)
+				var lastApplied int
+				var duplicateTable map[int64]DuplicateTableTerm
+				var stateMachine   map[string]string
+				if d.Decode(&lastApplied) != nil ||
+					d.Decode(&duplicateTable) != nil ||
+					d.Decode(&stateMachine) != nil {
+					panic("d.Decode() != nil")
+				} else {
+					kv.lastApplied = lastApplied
+					kv.duplicateTable = duplicateTable
+					kv.stateMachine = stateMachine
+				}
+				kv.mu.Unlock()
+				continue
+			}
 			command, _ := (m.Command).(Op)
-			raft.Debug(raft.DServer, "S%d apply, OpType = %s, Key = %s, Value = %s, ClientId = %d, SequenceNum = %d",
-				kv.me, command.OpType, command.Key, command.Value, command.ClientId, command.SequenceNum)
+			kv.lastApplied = m.CommandIndex
+			raft.Debug(raft.DServer, "S%d apply, OpType = %s, Key = %s, Value = %s, ClientId = %d, SequenceNum = %d m.CommandIndex = %d",
+				kv.me, command.OpType, command.Key, command.Value, command.ClientId, command.SequenceNum, m.CommandIndex)
 			if command.OpType == "Get" {
 				duplicateTableTerm, ok := kv.duplicateTable[command.ClientId]
-				if ok && command.SequenceNum == duplicateTableTerm.sequenceNum {
+				if ok && command.SequenceNum == duplicateTableTerm.SequenceNum {
 					if kvapplyList, ok := kv.applyList[m.CommandIndex]; ok {
-						delete(kv.applyList, m.CommandIndex)
 						kv.mu.Unlock()
 						kvapplyList <- ApplyList{
 							clientId:    command.ClientId,
 							sequenceNum: command.SequenceNum,
-							value:       duplicateTableTerm.value,
-							err:         duplicateTableTerm.err,
+							value:       duplicateTableTerm.Value,
+							err:         duplicateTableTerm.Err,
 						}
 					} else {
 						kv.mu.Unlock()
 					}
-				} else if ok && command.SequenceNum < duplicateTableTerm.sequenceNum {
+				} else if ok && command.SequenceNum < duplicateTableTerm.SequenceNum {
 					if kvapplyList, ok := kv.applyList[m.CommandIndex]; ok {
-						delete(kv.applyList, m.CommandIndex)
 						kv.mu.Unlock()
 						kvapplyList <- ApplyList{
 							clientId:    command.ClientId,
@@ -236,7 +255,6 @@ func (kv *KVServer) apply() {
 				} else {
 					var applyList ApplyList
 					kvapplyList, ok := kv.applyList[m.CommandIndex]
-					delete(kv.applyList, m.CommandIndex)
 					if ok {
 						if _, ok := kv.stateMachine[command.Key]; ok {
 							applyList = ApplyList{
@@ -246,9 +264,9 @@ func (kv *KVServer) apply() {
 								err:         OK,
 							}
 							kv.duplicateTable[command.ClientId] = DuplicateTableTerm{
-								sequenceNum: command.SequenceNum,
-								value:       kv.stateMachine[command.Key],
-								err:         OK,
+								SequenceNum: command.SequenceNum,
+								Value:       kv.stateMachine[command.Key],
+								Err:         OK,
 							}
 						} else {
 							applyList = ApplyList{
@@ -257,23 +275,23 @@ func (kv *KVServer) apply() {
 								err:         ErrNoKey,
 							}
 							kv.duplicateTable[command.ClientId] = DuplicateTableTerm{
-								sequenceNum: command.SequenceNum,
-								value:       kv.stateMachine[command.Key],
-								err:         ErrNoKey,
+								SequenceNum: command.SequenceNum,
+								Value:       kv.stateMachine[command.Key],
+								Err:         ErrNoKey,
 							}
 						}
 					} else {
 						if _, ok := kv.stateMachine[command.Key]; ok {
 							kv.duplicateTable[command.ClientId] = DuplicateTableTerm{
-								sequenceNum: command.SequenceNum,
-								value:       kv.stateMachine[command.Key],
-								err:         OK,
+								SequenceNum: command.SequenceNum,
+								Value:       kv.stateMachine[command.Key],
+								Err:         OK,
 							}
 						} else {
 							kv.duplicateTable[command.ClientId] = DuplicateTableTerm{
-								sequenceNum: command.SequenceNum,
-								value:       kv.stateMachine[command.Key],
-								err:         ErrNoKey,
+								SequenceNum: command.SequenceNum,
+								Value:       kv.stateMachine[command.Key],
+								Err:         ErrNoKey,
 							}
 						}
 					}
@@ -284,9 +302,8 @@ func (kv *KVServer) apply() {
 				}
 			} else {
 				duplicateTableTerm, ok := kv.duplicateTable[command.ClientId]
-				if ok && command.SequenceNum == duplicateTableTerm.sequenceNum {
+				if ok && command.SequenceNum == duplicateTableTerm.SequenceNum {
 					if kvapplyList, ok := kv.applyList[m.CommandIndex]; ok {
-						delete(kv.applyList, m.CommandIndex)
 						kv.mu.Unlock()
 						kvapplyList <- ApplyList{
 							clientId:    command.ClientId,
@@ -296,9 +313,8 @@ func (kv *KVServer) apply() {
 					} else {
 						kv.mu.Unlock()
 					}
-				} else if ok && command.SequenceNum < duplicateTableTerm.sequenceNum {
+				} else if ok && command.SequenceNum < duplicateTableTerm.SequenceNum {
 					if kvapplyList, ok := kv.applyList[m.CommandIndex]; ok {
-						delete(kv.applyList, m.CommandIndex)
 						kv.mu.Unlock()
 						kvapplyList <- ApplyList{
 							clientId:    command.ClientId,
@@ -311,7 +327,6 @@ func (kv *KVServer) apply() {
 				} else {
 					var applyList ApplyList
 					kvapplyList, ok := kv.applyList[m.CommandIndex]
-					delete(kv.applyList, m.CommandIndex)
 					if ok {
 						applyList = ApplyList{
 							clientId:    command.ClientId,
@@ -320,7 +335,7 @@ func (kv *KVServer) apply() {
 						}
 					}
 					kv.duplicateTable[command.ClientId] = DuplicateTableTerm{
-						sequenceNum: command.SequenceNum,
+						SequenceNum: command.SequenceNum,
 					}
 					if command.OpType == "Put" {
 						kv.stateMachine[command.Key] = command.Value
@@ -334,6 +349,23 @@ func (kv *KVServer) apply() {
 				}
 			}
 		}
+	}
+}
+
+func (kv *KVServer) snapshot() {
+	for kv.killed() == false {
+		time.Sleep(time.Duration(5) * time.Millisecond)
+		kv.mu.Lock()
+		if kv.maxraftstate != -1 && kv.rf.RaftStateSize() >= kv.maxraftstate {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.lastApplied)
+			e.Encode(kv.duplicateTable)
+			e.Encode(kv.stateMachine)
+			raftstate := w.Bytes()
+			kv.rf.Snapshot(kv.lastApplied, raftstate)
+		}
+		kv.mu.Unlock()
 	}
 }
 
@@ -360,14 +392,34 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.cond = sync.NewCond(&kv.mu)
-	kv.duplicateTable = make(map[int64]DuplicateTableTerm)
-	kv.stateMachine = make(map[string]string)
-	kv.applyList = make(map[int]chan ApplyList)
+	data := persister.ReadSnapshot()
+	if len(data) > 0 {
+		r := bytes.NewBuffer(data)
+		d := labgob.NewDecoder(r)
+		var lastApplied int
+		var duplicateTable map[int64]DuplicateTableTerm
+		var stateMachine   map[string]string
+		if d.Decode(&lastApplied) != nil ||
+			d.Decode(&duplicateTable) != nil ||
+			d.Decode(&stateMachine) != nil {
+			panic("d.Decode() != nil")
+		} else {
+			kv.lastApplied = lastApplied
+			kv.duplicateTable = duplicateTable
+			kv.stateMachine = stateMachine
+		}
+	} else {
+		kv.lastApplied = 0
+		kv.duplicateTable = make(map[int64]DuplicateTableTerm)
+		kv.stateMachine = make(map[string]string)
+	}
 
+	kv.applyList = make(map[int]chan ApplyList)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	go kv.apply()
+	go kv.snapshot()
 	return kv
 }
