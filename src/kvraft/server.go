@@ -92,7 +92,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.applyList[index] = make(chan ApplyList, 1)
 		kvapplyList = kv.applyList[index]
 		kv.mu.Unlock()
-		exkvapplyList<-ApplyList{
+		exkvapplyList <- ApplyList{
 			clientId:    args.ClientId,
 			sequenceNum: args.SequenceNum,
 		}
@@ -158,7 +158,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.applyList[index] = make(chan ApplyList, 1)
 		kvapplyList = kv.applyList[index]
 		kv.mu.Unlock()
-		exkvapplyList<-ApplyList{
+		exkvapplyList <- ApplyList{
 			clientId:    args.ClientId,
 			sequenceNum: args.SequenceNum,
 		}
@@ -171,7 +171,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrApplyFail
 		return
 	}
-	
+
 	if m.clientId != args.ClientId || m.sequenceNum != args.SequenceNum {
 		raft.Debug(raft.DServer, "S%d PutAppend rewrite index = %d", kv.me, index)
 		reply.Err = ErrApplyFail
@@ -210,7 +210,7 @@ func (kv *KVServer) apply() {
 				d := labgob.NewDecoder(r)
 				var lastApplied int
 				var duplicateTable map[int64]DuplicateTableTerm
-				var stateMachine   map[string]string
+				var stateMachine map[string]string
 				if d.Decode(&lastApplied) != nil ||
 					d.Decode(&duplicateTable) != nil ||
 					d.Decode(&stateMachine) != nil {
@@ -398,7 +398,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		d := labgob.NewDecoder(r)
 		var lastApplied int
 		var duplicateTable map[int64]DuplicateTableTerm
-		var stateMachine   map[string]string
+		var stateMachine map[string]string
 		if d.Decode(&lastApplied) != nil ||
 			d.Decode(&duplicateTable) != nil ||
 			d.Decode(&stateMachine) != nil {

@@ -70,6 +70,7 @@ type ServerState struct {
 	candidate stateType
 	leader    stateType
 }
+
 var serverstate ServerState = ServerState{
 	follower:  0,
 	candidate: 1,
