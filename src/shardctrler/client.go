@@ -5,6 +5,7 @@ package shardctrler
 //
 
 import "6.5840/labrpc"
+import "6.5840/raft"
 import "time"
 import "crypto/rand"
 import "math/big"
@@ -12,6 +13,14 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clientId    int64
+	sequenceNum int
+	leaderHint  int
+}
+
+type SendMsg struct {
+	server int
+	config Config
 }
 
 func nrand() int64 {
@@ -25,77 +34,306 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand()
+	ck.sequenceNum = 0
+	ck.leaderHint = -1
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
-	// Your code here.
-	args.Num = num
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+	ck.sequenceNum++
+	args := QueryArgs{
+		Num: num,
+		ClientId: ck.clientId,
+		SequenceNum: ck.sequenceNum,
+	}
+	if ck.leaderHint != -1 {
+		reply := QueryReply{}
+		if ok := ck.servers[ck.leaderHint].Call("ShardCtrler.Query", &args, &reply); ok {
+			if reply.WrongLeader {
+			} else if reply.Err == OK {
 				return reply.Config
+			} else if reply.Err == ErrExpired {
+			} else if reply.Err == ErrApplyFail {
+			}
+		} else {
+		}
+	}
+
+	ck.leaderHint = -1
+	getCh := make(chan SendMsg, 1)
+	var result SendMsg
+	hasresult := false
+	for !hasresult {
+		replyCh := make(chan int, len(ck.servers))
+		isreply := make([]bool, len(ck.servers))
+		for server := 0; server < len(ck.servers); server++ {
+			go ck.sendQueryHandle(server, args, getCh, replyCh)
+		}
+		for {
+			select {
+			case result = <-getCh:
+				hasresult = true
+			case server := <-replyCh:
+				isreply[server] = true
+			}
+			if hasresult {
+				break
+			}
+			isAllReply := true
+			for server := 0; server < len(ck.servers); server++ {
+				if !isreply[server] {
+					isAllReply = false
+					break
+				}
+			}
+			if isAllReply {
+				break
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		if !hasresult {
+			time.Sleep(time.Duration(raft.GetLeaderElectionTime()) * time.Millisecond)
+		}
 	}
+	ck.leaderHint = result.server
+	return result.config
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
-	// Your code here.
-	args.Servers = servers
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+	ck.sequenceNum++
+	args := JoinArgs{
+		Servers: servers,
+		ClientId: ck.clientId,
+		SequenceNum: ck.sequenceNum,
+	}
+	if ck.leaderHint != -1 {
+		reply := JoinReply{}
+		if ok := ck.servers[ck.leaderHint].Call("ShardCtrler.Join", &args, &reply); ok {
+			if reply.WrongLeader {
+			} else if reply.Err == OK {
 				return
+			} else if reply.Err == ErrExpired {
+			} else if reply.Err == ErrApplyFail {
+			}
+		} else {
+		}
+	}
+
+	ck.leaderHint = -1
+	getCh := make(chan SendMsg, 1)
+	var result SendMsg
+	hasresult := false
+	for !hasresult {
+		replyCh := make(chan int, len(ck.servers))
+		isreply := make([]bool, len(ck.servers))
+		for server := 0; server < len(ck.servers); server++ {
+			go ck.sendJoinHandle(server, args, getCh, replyCh)
+		}
+		for {
+			select {
+			case result = <-getCh:
+				hasresult = true
+			case server := <-replyCh:
+				isreply[server] = true
+			}
+			if hasresult {
+				break
+			}
+			isAllReply := true
+			for server := 0; server < len(ck.servers); server++ {
+				if !isreply[server] {
+					isAllReply = false
+					break
+				}
+			}
+			if isAllReply {
+				break
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		if !hasresult {
+			time.Sleep(time.Duration(raft.GetLeaderElectionTime()) * time.Millisecond)
+		}
 	}
+	ck.leaderHint = result.server
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
-	// Your code here.
-	args.GIDs = gids
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+	ck.sequenceNum++
+	args := LeaveArgs{
+		GIDs: gids,
+		ClientId: ck.clientId,
+		SequenceNum: ck.sequenceNum,
+	}
+	if ck.leaderHint != -1 {
+		reply := LeaveReply{}
+		if ok := ck.servers[ck.leaderHint].Call("ShardCtrler.Leave", &args, &reply); ok {
+			if reply.WrongLeader {
+			} else if reply.Err == OK {
 				return
+			} else if reply.Err == ErrExpired {
+			} else if reply.Err == ErrApplyFail {
+			}
+		} else {
+		}
+	}
+
+	ck.leaderHint = -1
+	getCh := make(chan SendMsg, 1)
+	var result SendMsg
+	hasresult := false
+	for !hasresult {
+		replyCh := make(chan int, len(ck.servers))
+		isreply := make([]bool, len(ck.servers))
+		for server := 0; server < len(ck.servers); server++ {
+			go ck.sendLeaveHandle(server, args, getCh, replyCh)
+		}
+		for {
+			select {
+			case result = <-getCh:
+				hasresult = true
+			case server := <-replyCh:
+				isreply[server] = true
+			}
+			if hasresult {
+				break
+			}
+			isAllReply := true
+			for server := 0; server < len(ck.servers); server++ {
+				if !isreply[server] {
+					isAllReply = false
+					break
+				}
+			}
+			if isAllReply {
+				break
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		if !hasresult {
+			time.Sleep(time.Duration(raft.GetLeaderElectionTime()) * time.Millisecond)
+		}
 	}
+	ck.leaderHint = result.server
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
-	// Your code here.
-	args.Shard = shard
-	args.GID = gid
-
-	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+	ck.sequenceNum++
+	args := MoveArgs{
+		Shard: shard,
+		GID:   gid,
+		ClientId: ck.clientId,
+		SequenceNum: ck.sequenceNum,
+	}
+	if ck.leaderHint != -1 {
+		reply := MoveReply{}
+		if ok := ck.servers[ck.leaderHint].Call("ShardCtrler.Move", &args, &reply); ok {
+			if reply.WrongLeader {
+			} else if reply.Err == OK {
 				return
+			} else if reply.Err == ErrExpired {
+			} else if reply.Err == ErrApplyFail {
+			}
+		} else {
+		}
+	}
+
+	ck.leaderHint = -1
+	getCh := make(chan SendMsg, 1)
+	var result SendMsg
+	hasresult := false
+	for !hasresult {
+		replyCh := make(chan int, len(ck.servers))
+		isreply := make([]bool, len(ck.servers))
+		for server := 0; server < len(ck.servers); server++ {
+			go ck.sendMoveHandle(server, args, getCh, replyCh)
+		}
+		for {
+			select {
+			case result = <-getCh:
+				hasresult = true
+			case server := <-replyCh:
+				isreply[server] = true
+			}
+			if hasresult {
+				break
+			}
+			isAllReply := true
+			for server := 0; server < len(ck.servers); server++ {
+				if !isreply[server] {
+					isAllReply = false
+					break
+				}
+			}
+			if isAllReply {
+				break
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		if !hasresult {
+			time.Sleep(time.Duration(raft.GetLeaderElectionTime()) * time.Millisecond)
+		}
 	}
+	ck.leaderHint = result.server
+}
+
+func (ck *Clerk) sendQueryHandle(server int, args QueryArgs, getCh chan SendMsg, replyCh chan int) {
+	reply := QueryReply{}
+	if ok := ck.servers[server].Call("ShardCtrler.Query", &args, &reply); ok {
+		if reply.WrongLeader {
+		} else if reply.Err == OK {
+			if len(getCh) == 0 {
+				getCh <- SendMsg{server: server, config: reply.Config}
+			}
+		} else if reply.Err == ErrExpired {
+		} else if reply.Err == ErrApplyFail {
+		}
+	} else {
+	}
+	replyCh <- server
+}
+
+func (ck *Clerk) sendJoinHandle(server int, args JoinArgs, getCh chan SendMsg, replyCh chan int) {
+	reply := JoinReply{}
+	if ok := ck.servers[server].Call("ShardCtrler.Join", &args, &reply); ok {
+		if reply.WrongLeader {
+		} else if reply.Err == OK {
+			if len(getCh) == 0 {
+				getCh <- SendMsg{server: server}
+			}
+		} else if reply.Err == ErrExpired {
+		} else if reply.Err == ErrApplyFail {
+		}
+	} else {
+	}
+	replyCh <- server
+}
+
+func (ck *Clerk) sendLeaveHandle(server int, args LeaveArgs, getCh chan SendMsg, replyCh chan int) {
+	reply := LeaveReply{}
+	if ok := ck.servers[server].Call("ShardCtrler.Leave", &args, &reply); ok {
+		if reply.WrongLeader {
+		} else if reply.Err == OK {
+			if len(getCh) == 0 {
+				getCh <- SendMsg{server: server}
+			}
+		} else if reply.Err == ErrExpired {
+		} else if reply.Err == ErrApplyFail {
+		}
+	} else {
+	}
+	replyCh <- server
+}
+
+func (ck *Clerk) sendMoveHandle(server int, args MoveArgs, getCh chan SendMsg, replyCh chan int) {
+	reply := MoveReply{}
+	if ok := ck.servers[server].Call("ShardCtrler.Move", &args, &reply); ok {
+		if reply.WrongLeader {
+		} else if reply.Err == OK {
+			if len(getCh) == 0 {
+				getCh <- SendMsg{server: server}
+			}
+		} else if reply.Err == ErrExpired {
+		} else if reply.Err == ErrApplyFail {
+		}
+	} else {
+	}
+	replyCh <- server
 }

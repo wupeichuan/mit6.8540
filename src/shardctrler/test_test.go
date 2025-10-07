@@ -5,9 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"6.5840/raft"
 )
-
-// import "time"
 
 func check(t *testing.T, groups []int, ck *Clerk) {
 	c := ck.Query(-1)
@@ -79,6 +78,7 @@ func check_same_config(t *testing.T, c1 Config, c2 Config) {
 }
 
 func TestBasic(t *testing.T) {
+	raft.InitDebug()
 	const nservers = 3
 	cfg := make_config(t, nservers, false)
 	defer cfg.cleanup()

@@ -80,7 +80,7 @@ func (ck *Clerk) Get(key string) string {
 		replyCh := make(chan int, len(ck.servers))
 		isreply := make([]bool, len(ck.servers))
 		for server := 0; server < len(ck.servers); server++ {
-			go ck.sendGet(server, args, getCh, replyCh)
+			go ck.sendGetHandle(server, args, getCh, replyCh)
 		}
 		for {
 			select {
@@ -193,7 +193,7 @@ func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
 }
 
-func (ck *Clerk) sendGet(server int, args GetArgs, getCh chan SendMsg, replyCh chan int) {
+func (ck *Clerk) sendGetHandle(server int, args GetArgs, getCh chan SendMsg, replyCh chan int) {
 	reply := GetReply{}
 	if ok := ck.servers[server].Call("KVServer.Get", &args, &reply); ok {
 		if reply.Err == OK {

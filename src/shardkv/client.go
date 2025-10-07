@@ -14,9 +14,6 @@ import "math/big"
 import "6.5840/shardctrler"
 import "time"
 
-// which shard is a key in?
-// please use this function,
-// and please do not change it.
 func key2shard(key string) int {
 	shard := 0
 	if len(key) > 0 {

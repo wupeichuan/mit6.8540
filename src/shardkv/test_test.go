@@ -10,6 +10,7 @@ import "sync/atomic"
 import "sync"
 import "math/rand"
 import "io/ioutil"
+import "6.5840/raft"
 
 const linearizabilityCheckTimeout = 1 * time.Second
 
@@ -22,6 +23,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 
 // test static 2-way sharding, without shard movement.
 func TestStaticShards(t *testing.T) {
+	raft.InitDebug()
 	fmt.Printf("Test: static shards ...\n")
 
 	cfg := make_config(t, 3, false, -1)
