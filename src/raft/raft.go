@@ -881,7 +881,7 @@ func (rf *Raft) conflictHandle1(conflictIndex int, conflictTerm int) int {
 			middle = (low + high) / 2
 		} else {
 			if low-rf.snapshot.lastIncludedIndex > len(rf.log)-1 {
-				// In this case it can't find conflictTerm in rf.log, and then it will return conflictIndex.
+				// This is the corner case that it can't find conflictTerm in rf.log, so it will return conflictIndex.
 				answer = low
 				break
 			} else if rf.log[low-rf.snapshot.lastIncludedIndex].Term <= conflictTerm {

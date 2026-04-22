@@ -36,7 +36,6 @@ type ApplyList struct {
 
 type KVServer struct {
 	mu      sync.Mutex
-	cond    *sync.Cond
 	me      int
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
@@ -391,7 +390,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.cond = sync.NewCond(&kv.mu)
+	// TODO: Remove followed snipet.
 	data := persister.ReadSnapshot()
 	if len(data) > 0 {
 		r := bytes.NewBuffer(data)
@@ -420,6 +419,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	go kv.apply()
-	go kv.snapshot()
+	if kv.maxraftstate != -1 {
+		go kv.snapshot()
+	}
 	return kv
 }

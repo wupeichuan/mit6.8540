@@ -18,6 +18,15 @@ const (
 
 type Err string
 
+type opType int
+type op struct {
+	kv opType
+	contrl opType
+}
+var optype op = op{
+	kv: 0,
+	contrl: 1,
+}
 // Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.

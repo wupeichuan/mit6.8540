@@ -56,6 +56,7 @@ func (ck *Clerk) Get(key string) string {
 		ClientId:    ck.clientId,
 		SequenceNum: ck.sequenceNum,
 	}
+	// TODO: If reply error but not ErrWrongLeader, it's like the leader has not changed so we should retry sending RPC to the same server.
 	if ck.leaderHint != -1 {
 		reply := GetReply{}
 		if ok := ck.servers[ck.leaderHint].Call("KVServer.Get", &args, &reply); ok {

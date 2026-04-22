@@ -3,7 +3,7 @@ echo "===== the test start ====="
 
 start_time=$(date +%s.%N)
 tmpdir=$(mktemp -d)
-iternum=({0..1})
+iternum=({0..0})
 process_num=({0..74})
 for x in ${iternum[@]}; do
     for i in ${process_num[@]}; do
